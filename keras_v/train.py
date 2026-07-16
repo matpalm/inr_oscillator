@@ -1,17 +1,15 @@
 import os
 
-# this package dir is literally named `keras`, which shadows the installed
-# `keras` (v3) package. force TF's legacy Keras (tf_keras / Keras 2 API, which
-# qkeras also expects) so nothing imports the top-level `keras` package.
 os.environ.setdefault("TF_USE_LEGACY_KERAS", "1")
 
 import tensorflow as tf
 from pathlib import Path
 import json
 
-from tensorflow.keras.optimizers import Adam
+from tensorflow.keras.optimizers import AdamW
 
 from .model import create_rff_inr_model
+from .util import CheckYPred
 from tf_data.quadrature_data import Embed2DQuadratureData
 from common.losses import combined_masked_loss_terms
 
@@ -24,10 +22,12 @@ if __name__ == "__main__":
     )
     parser.add_argument("--run", type=Path, required=True)
     parser.add_argument("--learning-rate", type=float, default=1e-3)
+    parser.add_argument("--weight-decay", type=float, default=1e-4)
     parser.add_argument("--epochs", type=int, default=10)
     parser.add_argument("--batch-size", type=int, default=32)
-    parser.add_argument("--min-note", type=str, default="A4")
-    parser.add_argument("--max-note", type=str, default="A4")
+    parser.add_argument("--min-note", type=str, default="A2")
+    parser.add_argument("--max-note", type=str, default="A5")
+    parser.add_argument("--harsh", action="store_true")
     parser.add_argument("--sample-rate-khz", type=float, default=192)
     parser.add_argument("--seed", type=int, default=123)
     parser.add_argument("--num-train-samples", type=int, default=10_000)
@@ -35,7 +35,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--num-fourier-features",
         type=int,
-        default=128,
+        default=64,
         help="number of Random Fourier Features (output dim is 2x this)",
     )
     parser.add_argument(
@@ -45,23 +45,23 @@ if __name__ == "__main__":
         help="Gaussian std (sigma) for the fixed RFF frequency matrix B",
     )
     parser.add_argument("--rff-seed", type=int, default=0)
-    parser.add_argument("--mlp-layers", type=int, default=3)
-    parser.add_argument("--mlp-width", type=int, default=128)
+    parser.add_argument("--mlp-layers", type=int, default=2)
+    parser.add_argument("--mlp-width", type=int, default=16)
     parser.add_argument(
         "--alpha-mse",
         type=float,
         default=1.0,
         help="weight for masked MSE/Huber in combined loss",
     )
-    parser.add_argument(
-        "--use-huber-loss",
-        action="store_true",
-        help="if set use huber instead of MSE",
-    )
+    # parser.add_argument(
+    #     "--use-huber-loss",
+    #     action="store_true",
+    #     help="if set use huber instead of MSE",
+    # )
     parser.add_argument(
         "--beta-stft",
         type=float,
-        default=0.1,
+        default=0.001,
         help="STFT-loss weight in combined loss",
     )
     opts = parser.parse_args()
@@ -86,6 +86,7 @@ if __name__ == "__main__":
         min_note=opts.min_note,
         max_note=opts.max_note,
         sample_rate_khz=opts.sample_rate_khz,
+        harsh=opts.harsh,
         seed=opts.seed,
     )
     train_ds = data.tf_dataset(
@@ -127,16 +128,17 @@ if __name__ == "__main__":
             save_weights_only=True,
         )
     )
+    callbacks.append(CheckYPred(tb_dir=str(tensorboard_dir), dataset=validate_ds))
 
     # the INR is pointwise so there is no receptive field to mask
     combined_loss_fn, mse_loss_metric, stft_loss_metric = combined_masked_loss_terms(
         receptive_field_size=None,
-        use_huber_loss=opts.use_huber_loss,
+        use_huber_loss=True,
         alpha_mse=opts.alpha_mse,
         beta_stft=opts.beta_stft,
         seq_len=TRAIN_SEQ_LEN,
     )
-    optimizer = Adam(opts.learning_rate)
+    optimizer = AdamW(opts.learning_rate, weight_decay=opts.weight_decay)
     train_model.compile(
         optimizer,
         loss=combined_loss_fn,

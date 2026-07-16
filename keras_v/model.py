@@ -1,8 +1,5 @@
 import os
 
-# this package dir is literally named `keras`, which shadows the installed
-# `keras` (v3) package. force TF's legacy Keras (tf_keras / Keras 2 API, which
-# qkeras also expects) so nothing imports the top-level `keras` package.
 os.environ.setdefault("TF_USE_LEGACY_KERAS", "1")
 
 import numpy as np

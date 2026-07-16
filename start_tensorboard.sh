@@ -1,0 +1,1 @@
+uv run --with "numpy<2" --with "setuptools<82" tensorboard --logdir $1
