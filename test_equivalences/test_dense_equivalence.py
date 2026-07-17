@@ -22,29 +22,41 @@ from amaranth.sim import Simulator
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from amaranth_future import fixed
-from amaranth_v import NNQ, NNQ_DW
+from amaranth_v import NNQ
 from amaranth_v.dense_layer import QDenseLayer
 
 
-def golden(x_codes, w_codes, b_codes, out_shape, apply_relu, relu_upper_bound):
+def golden(
+    x_codes,
+    w_codes,
+    b_codes,
+    acc_shape,
+    out_shape,
+    apply_relu,
+    relu_upper_bound,
+    prod_shift=0,
+):
     """Integer-exact reference for QDenseLayer over a batch of inputs.
 
     Args:
-        x_codes  (N, IN_D)   NNQ raw integer codes
+        x_codes  (N, IN_D)     in_shape raw integer codes
         w_codes  (IN_D, OUT_D) NNQ raw integer codes
-        b_codes  (OUT_D,)    NNQ_DW raw integer codes
+        b_codes  (OUT_D,)      acc_shape raw integer codes
+        prod_shift             left-shift applied to each a*b product to align
+                               it with a wider accumulator (see QDenseLayer)
     Returns:
         (N, OUT_D) out_shape raw integer codes
     """
-    W = NNQ_DW.width
+
+    W = acc_shape.width
     dw_mask = (1 << W) - 1
-    frac_drop = NNQ_DW.f_bits - out_shape.f_bits
+    frac_drop = acc_shape.f_bits - out_shape.f_bits
     out_width = out_shape.width
 
-    lower = fixed.Const(out_shape.min().as_float(), shape=NNQ_DW)._value
-    upper = fixed.Const(out_shape.max().as_float(), shape=NNQ_DW)._value
+    lower = fixed.Const(out_shape.min().as_float(), shape=acc_shape)._value
+    upper = fixed.Const(out_shape.max().as_float(), shape=acc_shape)._value
     if apply_relu:
-        relu_ub = fixed.Const(relu_upper_bound, shape=NNQ_DW)._value
+        relu_ub = fixed.Const(relu_upper_bound, shape=acc_shape)._value
 
     n, in_d = x_codes.shape
     out_d = w_codes.shape[1]
@@ -54,7 +66,7 @@ def golden(x_codes, w_codes, b_codes, out_shape, apply_relu, relu_upper_bound):
         for o in range(out_d):
             acc = int(b_codes[o])
             for i in range(in_d):
-                acc += int(x_codes[row, i]) * int(w_codes[i, o])
+                acc += (int(x_codes[row, i]) * int(w_codes[i, o])) << prod_shift
 
             # clamp
             acc = min(max(acc, lower), upper)
@@ -117,36 +129,47 @@ class TestDenseEquivalence(unittest.TestCase):
     ROWS = 64
     SEED = 0
 
-    def _check(self, apply_relu, relu_upper_bound, out_shape):
+    def _check(self, apply_relu, relu_upper_bound, out_shape, in_shape=NNQ):
         rng = np.random.default_rng(self.SEED)
         n_frac = NNQ.f_bits
-        dw_frac = NNQ_DW.f_bits
+        in_frac = in_shape.f_bits
+        acc_f = in_frac + n_frac
 
-        # exactly representable NNQ kernel / inputs, NNQ_DW bias
-        lo, hi = NNQ.min().as_float(), NNQ.max().as_float()
+        # exactly representable weights (NNQ), inputs (in_shape), bias (acc scale)
+        w_lo, w_hi = NNQ.min().as_float(), NNQ.max().as_float()
+        in_lo, in_hi = in_shape.min().as_float(), in_shape.max().as_float()
         kernel = (
-            np.round(rng.uniform(lo, hi, (self.IN_D, self.OUT_D)) * 2**n_frac)
+            np.round(rng.uniform(w_lo, w_hi, (self.IN_D, self.OUT_D)) * 2**n_frac)
             / 2**n_frac
         )
         inputs = (
-            np.round(rng.uniform(-1.0, 1.0, (self.ROWS, self.IN_D)) * 2**n_frac)
-            / 2**n_frac
+            np.round(rng.uniform(in_lo, in_hi, (self.ROWS, self.IN_D)) * 2**in_frac)
+            / 2**in_frac
         )
-        bias = np.round(rng.uniform(lo, hi, (self.OUT_D,)) * 2**dw_frac) / 2**dw_frac
+        bias = np.round(rng.uniform(w_lo, w_hi, (self.OUT_D,)) * 2**acc_f) / 2**acc_f
 
         w_codes = np.round(kernel * 2**n_frac).astype(np.int64)
-        x_codes = np.round(inputs * 2**n_frac).astype(np.int64)
-        b_codes = np.round(bias * 2**dw_frac).astype(np.int64)
+        x_codes = np.round(inputs * 2**in_frac).astype(np.int64)
+        b_codes = np.round(bias * 2**acc_f).astype(np.int64)
 
         dut = QDenseLayer(
             kernel.astype(np.float64),
             bias.astype(np.float64),
             apply_relu=apply_relu,
             relu_upper_bound=relu_upper_bound,
+            in_shape=in_shape,
             out_shape=out_shape,
         )
         hw = simulate(dut, x_codes)
-        ref = golden(x_codes, w_codes, b_codes, out_shape, apply_relu, relu_upper_bound)
+        ref = golden(
+            x_codes,
+            w_codes,
+            b_codes,
+            dut.acc_shape,
+            out_shape,
+            apply_relu,
+            relu_upper_bound,
+        )
 
         self.assertEqual(hw.shape, ref.shape)
         if not np.array_equal(hw, ref):
@@ -164,6 +187,15 @@ class TestDenseEquivalence(unittest.TestCase):
     def test_regression_no_relu(self):
         # no-relu regression config: narrow to the io fixed-point shape
         self._check(apply_relu=False, relu_upper_bound=None, out_shape=fixed.SQ(1, 15))
+
+    def test_mlp0_io_input(self):
+        # first MLP layer: io-format input (SQ(2,14)) -> NNQ output with relu
+        self._check(
+            apply_relu=True,
+            relu_upper_bound=8.0,
+            out_shape=NNQ,
+            in_shape=fixed.SQ(2, 14),
+        )
 
 
 if __name__ == "__main__":
