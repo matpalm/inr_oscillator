@@ -103,14 +103,7 @@ def main():
 
     golden = rff_lut_features(phase_codes, b_codes, cos_lut, sin_lut, shift, lut_bits)
 
-    dut = RandomFourierFeaturesLUT(
-        b_codes=b_codes.tolist(),
-        cos_lut=cos_lut.tolist(),
-        sin_lut=sin_lut.tolist(),
-        io_bits=io_bits,
-        b_bits=b_bits,
-        shift=shift,
-    )
+    dut = RandomFourierFeaturesLUT.from_rff(rff, lut_size=opts.lut_size)
     hw = simulate(dut, phase_codes)
 
     print(

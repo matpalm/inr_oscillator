@@ -10,26 +10,32 @@ one sign bit, ``integer`` integer bits, and ``bits - integer - 1`` fractional
 bits.
 """
 
-import os
-
-os.environ.setdefault("TF_USE_LEGACY_KERAS", "1")
-os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
-
 import numpy as np
-from qkeras import quantized_bits
-
 
 def frac_bits(bits, integer, keep_negative=1):
     """Number of fractional bits for a qkeras ``quantized_bits(bits, integer)``."""
     return bits - integer - keep_negative
 
 
-def quantise_to_codes(values, bits, integer):
-    """Quantise ``values`` with qkeras and return the underlying integer codes."""
-    q = quantized_bits(bits=bits, integer=integer, alpha=1)
-    qv = np.asarray(q(np.asarray(values, dtype=np.float32)))
-    f = frac_bits(bits, integer)
-    return np.round(qv * (2.0**f)).astype(np.int64)
+def quantise_to_codes(values, bits, integer, keep_negative=1):
+    """Integer codes for qkeras ``quantized_bits(bits, integer, alpha=1)``.
+
+    scale by ``2**frac``, round half-to-even (matching ``tf.round``), and
+    clip to the signed code range.
+    """
+    f = frac_bits(bits, integer, keep_negative)
+    # qkeras casts inputs to float32 (Keras floatx) before quantising; match that,
+    # then promote to float64 so the *2**f scale and rounding stay exact.
+    vals = np.asarray(values, dtype=np.float32).astype(np.float64)
+    scaled = vals * (2.0**f)
+    codes = np.round(scaled).astype(
+        np.int64
+    )  # numpy rounds half-to-even, like tf.round
+    if keep_negative:
+        lo, hi = -(1 << (bits - 1)), (1 << (bits - 1)) - 1
+    else:
+        lo, hi = 0, (1 << bits) - 1
+    return np.clip(codes, lo, hi)
 
 
 def build_io_luts(lut_size, io_bits, io_integer):

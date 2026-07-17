@@ -26,6 +26,7 @@ from amaranth.lib.wiring import In, Out
 
 
 class RandomFourierFeaturesLUT(wiring.Component):
+
     def __init__(self, b_codes, cos_lut, sin_lut, io_bits, b_bits, shift):
         self._b_codes = [int(c) for c in b_codes]
         self._cos_lut = [int(c) for c in cos_lut]
@@ -54,6 +55,43 @@ class RandomFourierFeaturesLUT(wiring.Component):
                     )
                 ),
             }
+        )
+
+    @classmethod
+    def from_rff(cls, rff, lut_size=1024):
+        """Build the component from a pickled ``rff`` entry (see ``qkeras_v.train``).
+
+        ``rff`` is the dict stored under ``weights["rff"]`` in the qkeras pickle:
+        ``{"B", "b_bits", "b_integer", "io_bits", "io_integer"}``.  The B codes and
+        cos/sin LUT are derived with ``qkeras_v.rff_lut`` (the same helpers the
+        numpy golden model uses), so the resulting hardware stays bit-exact.
+        """
+        import numpy as np
+        from qkeras_v.rff_lut import build_io_luts, frac_bits, plan_shift
+
+        b_bits, b_integer = int(rff["b_bits"]), int(rff["b_integer"])
+        io_bits, io_integer = int(rff["io_bits"]), int(rff["io_integer"])
+
+        # RFF input is the scalar phase (in_dim == 1); B is (in_dim, num_features).
+        b_f = frac_bits(b_bits, b_integer)
+        B = np.asarray(rff["B"]).reshape(-1)
+        b_codes = np.round(B * (2.0**b_f)).astype(np.int64).tolist()
+
+        shift, _ = plan_shift(io_bits, io_integer, b_bits, b_integer, lut_size)
+        if shift < 0:
+            raise ValueError(
+                f"lut_size={lut_size} too large for io_frac+b_frac="
+                f"{frac_bits(io_bits, io_integer) + b_f}"
+            )
+        cos_lut, sin_lut = build_io_luts(lut_size, io_bits, io_integer)
+
+        return cls(
+            b_codes=b_codes,
+            cos_lut=cos_lut.tolist(),
+            sin_lut=sin_lut.tolist(),
+            io_bits=io_bits,
+            b_bits=b_bits,
+            shift=shift,
         )
 
     def elaborate(self, platform):
