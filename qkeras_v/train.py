@@ -78,13 +78,12 @@ def train(opts):
     )
 
     # make model
-    builder = QKerasRFFModelBuilder(
-        n_int=opts.mlp_fp_int,
-        n_frac=opts.mlp_fp_frac,
-        io_n_int=opts.io_fp_int,
-        io_n_frac=opts.io_fp_frac,
-    )
+    builder = QKerasRFFModelBuilder()
     model_config = {
+        "fp_info": {
+            "mlp": {"n_int": opts.mlp_fp_int, "n_frac": opts.mlp_fp_frac},
+            "io": {"n_int": opts.io_fp_int, "n_frac": opts.io_fp_frac},
+        },
         "in_d": IN_D,
         "num_fourier_features": opts.num_fourier_features,
         "rff_scale": opts.rff_scale,
@@ -118,8 +117,8 @@ def train(opts):
     with open(run_path / "qkeras_model.fp_config.json", "w") as f:
         json.dump(
             {
-                "n_int": builder.n_int,
-                "n_frac": builder.n_frac,
+                "n_int": builder.mlp_n_int,
+                "n_frac": builder.mlp_n_frac,
                 "io_n_int": builder.io_n_int,
                 "io_n_frac": builder.io_n_frac,
                 "init_weights_path": init_weights_path,

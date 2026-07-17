@@ -72,33 +72,14 @@ class QRandomFourierFeatures(Layer):
 
 class QKerasRFFModelBuilder(object):
 
-    def __init__(self, n_int: int, n_frac: int, io_n_int: int, io_n_frac: int):
-        """
-        Args:
-            n_int: bits for the MLP FP integer part (kernels/biases/activations)
-            n_frac: bits for the MLP FP fractional part
-            io_n_int: bits for the signal-path FP integer part (phase/embed/rff
-                output/model output, all in [-1, 1])
-            io_n_frac: bits for the signal-path FP fractional part
-        """
-        # TODO can we just always use io_n_int = 1 ?
-        self.n_int = n_int
-        self.n_frac = n_frac
-        self.n_word = n_int + n_frac
-        self.io_n_int = io_n_int
-        self.io_n_frac = io_n_frac
-        self.io_n_word = io_n_int + io_n_frac
-        print(
-            f"FP N_INT={self.n_int} N_FRAC={self.n_frac}"
-            f" IO_N_INT={self.io_n_int} IO_N_FRAC={self.io_n_frac}"
-        )
+    def __init__(self):
         self.layer_info = []
         self.built = False
 
     # quantiser for kernels / biases
     def quantiser(self, double_width: bool = False):
-        nword = self.n_word
-        nint = self.n_int
+        nword = self.mlp_n_word
+        nint = self.mlp_n_int
         if double_width:
             nword *= 2
             nint *= 2
@@ -113,18 +94,17 @@ class QKerasRFFModelBuilder(object):
     # |B| routinely exceeds the weight integer range; size the integer part to
     # cover ~4 sigma so we do not clip the sampled frequencies.
     def b_quantiser(self, scale: float):
-        n_int_b = max(self.n_int, int(math.ceil(math.log2(max(4.0 * scale, 1.0)))))
+        n_int_b = max(self.mlp_n_int, int(math.ceil(math.log2(max(4.0 * scale, 1.0)))))
         self.layer_info.append({"type": "rff_b_quant", "n_int": n_int_b})
-        return quantized_bits(bits=n_int_b + self.n_frac, integer=n_int_b, alpha=1)
+        return quantized_bits(bits=n_int_b + self.mlp_n_frac, integer=n_int_b, alpha=1)
 
     # relu activation quantiser (string form consumed by QActivation)
     def quant_relu(self, upper_bound: float):
-        return (
-            f"quantized_relu({self.n_word},{self.n_int},relu_upper_bound={upper_bound})"
-        )
+        return f"quantized_relu({self.mlp_n_word},{self.mlp_n_int},relu_upper_bound={upper_bound})"
 
     def create_rff_inr_model(
         self,
+        fp_info: dict,
         in_d: int,
         num_fourier_features: int,
         rff_scale: float,
@@ -134,11 +114,16 @@ class QKerasRFFModelBuilder(object):
         relu_upper_bound: float,
         rff_seed: int = 0,
     ):
-        # quantised implicit neural representation (INR):
-        #   phase -> quantised Random Fourier Features -> concat quantised 2D
-        #   waveform embedding -> quantised ReLU MLP -> quantised output.
-        #
-        # input layout (last axis): [phase, embed0, embed1, ...]
+        # phase -> quantised Random Fourier Features -> concat quantised 2D
+        # waveform embedding -> quantised ReLU MLP -> quantised output.
+
+        self.mlp_n_int = fp_info["mlp"]["n_int"]
+        self.mlp_n_frac = fp_info["mlp"]["n_frac"]
+        self.mlp_n_word = self.mlp_n_int + self.mlp_n_frac
+        self.io_n_int = fp_info["io"]["n_frac"]
+        self.io_n_frac = fp_info["io"]["n_frac"]
+        self.io_n_word = self.io_n_int + self.io_n_frac
+
         self.layer_info = []
 
         inp = Input((None, in_d))
@@ -183,6 +168,7 @@ class QKerasRFFModelBuilder(object):
         )(h)
         self.layer_info.append({"type": "qdense", "id": "y_pred", "width": out_d})
 
+        # TODO: should we keep this as self.quantiser as cdcc did?
         y_pred = QActivation(self.io_quantiser(), name="qout")(y_pred)
         self.layer_info.append(
             {"type": "qout", "n_int": self.io_n_int, "n_frac": self.io_n_frac}
@@ -198,8 +184,8 @@ def create_rff_inr_model_from_config_and_latest_ckpt(run: str):
     with open(run_dir_path / "qkeras_model.fp_config.json", "r") as f:
         fp_config = json.load(f)
     builder = QKerasRFFModelBuilder(
-        n_int=fp_config["n_int"],
-        n_frac=fp_config["n_frac"],
+        mlp_n_int=fp_config["n_int"],
+        mlp_n_frac=fp_config["n_frac"],
         io_n_int=fp_config["io_n_int"],
         io_n_frac=fp_config["io_n_frac"],
     )
