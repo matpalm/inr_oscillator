@@ -134,6 +134,17 @@ def train(opts):
     class SaveQuantisedWeights(tf.keras.callbacks.Callback):
         def on_epoch_end(self, epoch, logs=None):
             quantised_weights = model_save_quantized_weights(train_model)
+            # The RFF layer is fixed / non-trainable, so qkeras skips it; store its
+            # quantised frequency matrix and fixed-point formats so downstream tools
+            # (e.g. the amaranth_v hardware model) can reproduce the RFF exactly.
+            rff = train_model.get_layer("rff")
+            quantised_weights["rff"] = {
+                "B": rff.b_quantizer(rff.B).numpy(),
+                "b_bits": int(rff.b_quantizer.bits),
+                "b_integer": int(rff.b_quantizer.integer),
+                "io_bits": int(rff.out_quantizer.bits),
+                "io_integer": int(rff.out_quantizer.integer),
+            }
             pkl_fname = qkeras_weights_dir / f"e{epoch:03d}.pkl"
             with open(pkl_fname, "wb") as f:
                 pickle.dump(quantised_weights, f, protocol=pickle.HIGHEST_PROTOCOL)

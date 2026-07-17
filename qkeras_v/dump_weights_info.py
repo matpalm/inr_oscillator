@@ -21,6 +21,9 @@ with open(opts.weights_pkl, "rb") as f:
 ws = []
 bs = []
 for layer in weights.keys():
+    if "weights" not in weights[layer]:
+        # e.g. the "rff" entry, which stores the fixed frequency matrix, not (w, b)
+        continue
     w, b = weights[layer]["weights"]
     ws.append(w.flatten())
     bs.append(b.flatten())

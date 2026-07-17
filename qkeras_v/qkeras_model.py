@@ -81,6 +81,7 @@ class QKerasRFFModelBuilder(object):
                 output/model output, all in [-1, 1])
             io_n_frac: bits for the signal-path FP fractional part
         """
+        # TODO can we just always use io_n_int = 1 ?
         self.n_int = n_int
         self.n_frac = n_frac
         self.n_word = n_int + n_frac
