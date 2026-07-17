@@ -16,6 +16,10 @@ from .model import create_rff_inr_model
 from .util import CheckYPred
 from tf_data.quadrature_data import Embed2DQuadratureData
 from common.losses import combined_loss_terms
+from common.callbacks import (
+    setup_beta_stft_var_and_update_callback,
+    LogLrAndBetaStft,
+)
 
 def train(opts):
 
@@ -78,7 +82,14 @@ def train(opts):
     with open(run_path / "train_model_summary.txt", "w") as f:
         train_model.summary(print_fn=lambda line: f.write(line + "\n"))
 
+    ramp_callback, beta_stft = setup_beta_stft_var_and_update_callback(
+        opts.epochs, opts.beta_stft_warmup, opts.beta_stft_ramp, opts.beta_stft
+    )
+
     callbacks = []
+
+    # log beta_stft (and lr) into the logs before the TensorBoard callback
+    callbacks.append(LogLrAndBetaStft(beta_stft_var=beta_stft))
     callbacks.append(tf.keras.callbacks.TensorBoard(log_dir=str(tensorboard_dir)))
     callbacks.append(
         tf.keras.callbacks.ModelCheckpoint(
@@ -87,8 +98,8 @@ def train(opts):
         )
     )
     callbacks.append(CheckYPred(tb_dir=str(tensorboard_dir), dataset=validate_ds))
-
-    # TODO: bring over the warmup and ramp
+    if ramp_callback is not None:
+        callbacks.append(ramp_callback)
 
     def halving_triple(base):
         # o_O
@@ -108,7 +119,7 @@ def train(opts):
     combined_loss_fn, mse_metric, huber_metric, stft_metric = combined_loss_terms(
         alpha_mse=opts.alpha_mse,
         alpha_huber=opts.alpha_huber,
-        beta_stft=opts.beta_stft,
+        beta_stft=beta_stft,
         seq_len=TRAIN_SEQ_LEN,
         stft_fft_sizes=halving_triple(opts.base_stft_fft_size),
         stft_win_lengths=halving_triple(opts.base_stft_win_length),
@@ -172,7 +183,19 @@ def build_parser():
         "--beta-stft",
         type=float,
         default=0.0001,
-        help="STFT-loss weight in combined loss",
+        help="target STFT-loss weight in combined loss (after warmup and ramp)",
+    )
+    parser.add_argument(
+        "--beta-stft-warmup",
+        type=int,
+        default=0,
+        help="keep beta_stft at 0 for this many epochs at start",
+    )
+    parser.add_argument(
+        "--beta-stft-ramp",
+        type=int,
+        default=0,
+        help="linearly ramp beta_stft from 0 to target over this many epochs (post warmup)",
     )
     parser.add_argument(
         "--base-stft-fft-size",
