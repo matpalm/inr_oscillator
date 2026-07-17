@@ -75,22 +75,17 @@ def create_rff_inr_model(
     rff_seed: int = 0,
 ):
     # creates an implicit neural representation (INR) model:
-    #   reconstruct phase angle from (sin, cos), map through fixed Random
-    #   Fourier Features, concat the raw 2D waveform embedding, then regress
-    #   the waveshaped output with a standard ReLU MLP.
+    #   map the phase angle through fixed Random Fourier
+    #   Features, concat the raw 2D waveform embedding, then regress the
+    #   waveshaped output with a standard ReLU MLP.
     #
-    # input layout (last axis): [phase_sin, phase_cos, embed0, embed1, ...]
+    # input layout (last axis): [phase, embed0, embed1, ...]
 
     inp = Input((None, in_d))
 
-    phase_sin = Lambda(lambda t: t[..., 0:1], name="phase_sin")(inp)
-    phase_cos = Lambda(lambda t: t[..., 1:2], name="phase_cos")(inp)
-    embed = Lambda(lambda t: t[..., 2:in_d], name="embed")(inp)
-
-    # reconstruct the 1D phase angle in (-pi, pi]
-    phase = Lambda(lambda t: tf.math.atan2(t[0], t[1]), name="phase_angle")(
-        [phase_sin, phase_cos]
-    )
+    # phase angle in [-1, 1); at inference run as: phase += delta; wrap 1 to -1
+    phase = Lambda(lambda t: t[..., 0:1], name="phase")(inp)
+    embed = Lambda(lambda t: t[..., 1:in_d], name="embed")(inp)
 
     rff = RandomFourierFeatures(
         num_features=num_fourier_features,

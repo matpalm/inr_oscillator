@@ -1,12 +1,11 @@
 import tensorflow as tf
 
 
-def masked_huber(receptive_field_size: int = None, alpha=0.1, reduce_mean: bool = True):
+def huber(alpha=0.1, reduce_mean: bool = True):
     """
-    Calculates masked version of the Huber loss
+    Calculates the Huber loss
 
     Parameters:
-        receptive_field_size: number of initial time steps to ignore
         alpha: Huber delta; threshold when the loss transitions from quadratic to linear
     Returns:
         keras loss function
@@ -18,10 +17,6 @@ def masked_huber(receptive_field_size: int = None, alpha=0.1, reduce_mean: bool 
         assert y_true.shape == y_pred.shape
         assert len(y_true.shape) == 3, "expected (batch, sequence_length, output_dim)"
         assert y_true.shape[-1] == 1, "expected (batch, sequence_length, output_dim=1)"
-        if receptive_field_size:
-            assert (
-                y_true.shape[-2] > receptive_field_size
-            ), "sequence is shorter than receptive_field_size!"
         # huber loss per element
         error = y_true - y_pred
         abs_error = tf.abs(error)
@@ -30,10 +25,6 @@ def masked_huber(receptive_field_size: int = None, alpha=0.1, reduce_mean: bool 
         huber = 0.5 * tf.square(quadratic) + alpha * linear
         # average over elements of y
         huber = tf.reduce_mean(huber, axis=-1)
-        if receptive_field_size:
-            # we want to ignore the first elements of the loss since they
-            # have been fed with left padded data
-            huber = huber[:, receptive_field_size:]
         # return per-example average over sequence, optionally reduced over batch
         huber = tf.reduce_mean(huber, axis=-1)
         return tf.reduce_mean(huber) if reduce_mean else huber
@@ -41,12 +32,10 @@ def masked_huber(receptive_field_size: int = None, alpha=0.1, reduce_mean: bool 
     return loss_fn
 
 
-def masked_mse(receptive_field_size: int = None, reduce_mean: bool = True):
+def mse(reduce_mean: bool = True):
     """
-    Calculates masked version of mean square error
+    Calculates mean square error
 
-    Parameters:
-        receptive_field_size: number of initial time steps to ignore
     Returns:
         keras loss function
     """
@@ -55,16 +44,8 @@ def masked_mse(receptive_field_size: int = None, reduce_mean: bool = True):
         assert y_true.shape == y_pred.shape
         assert len(y_true.shape) == 3, "expected (batch, sequence_length, output_dim)"
         assert y_true.shape[-1] == 1, "expected (batch, sequence_length, output_dim=1)"
-        if receptive_field_size:
-            assert (
-                y_true.shape[-2] > receptive_field_size
-            ), "sequence is shorter than receptive_field_size!"
         # average over elements of y
         mse = tf.reduce_mean(tf.square(y_true - y_pred), axis=-1)
-        # we want to ignore the first elements of the loss since they
-        # have been fed with left padded data
-        if receptive_field_size:
-            mse = mse[:, receptive_field_size:]
         # return per-example average over sequence, optionally reduced over batch
         mse = tf.reduce_mean(mse, axis=-1)
         return tf.reduce_mean(mse) if reduce_mean else mse
@@ -72,8 +53,7 @@ def masked_mse(receptive_field_size: int = None, reduce_mean: bool = True):
     return loss_fn
 
 
-def masked_multires_stft_loss(
-    receptive_field_size: int = None,
+def multires_stft_loss(
     fft_sizes=(256, 128, 64),
     hop_sizes=(64, 32, 16),
     win_lengths=(256, 128, 64),
@@ -83,10 +63,9 @@ def masked_multires_stft_loss(
     seq_len: int = None,
 ):
     """
-    Calculates masked multi-resolution STFT loss
+    Calculates multi-resolution STFT loss
 
     Args:
-        receptive_field_size: number of initial time steps to ignore
         fft_sizes: FFT sizes used at each STFT res
         hop_sizes: STFT hop sizes for each res
         win_lengths: STFT window lengths for each res
@@ -97,10 +76,10 @@ def masked_multires_stft_loss(
 
     assert len(fft_sizes) == len(hop_sizes) == len(win_lengths)
 
-    # drop resolutions that can't fit the (post-mask) signal, otherwise the
+    # drop resolutions that can't fit the signal, otherwise the
     # STFT collapses to a single padded frame and the "multi-res" is a no-op.
     if seq_len is not None:
-        avail = seq_len - (receptive_field_size or 0)
+        avail = seq_len
         kept = [
             (f, h, w)
             for f, h, w in zip(fft_sizes, hop_sizes, win_lengths)
@@ -119,7 +98,7 @@ def masked_multires_stft_loss(
         )
 
     print(
-        "masked_multires_stft_loss resolutions"
+        "multires_stft_loss resolutions"
         f" fft_sizes={tuple(fft_sizes)}"
         f" hop_sizes={tuple(hop_sizes)}"
         f" win_lengths={tuple(win_lengths)}"
@@ -141,23 +120,10 @@ def masked_multires_stft_loss(
         assert y_true.shape == y_pred.shape
         assert len(y_true.shape) == 3, "expected (batch, sequence_length, output_dim)"
         assert y_true.shape[-1] == 1, "expected (batch, sequence_length, output_dim=1)"
-        if receptive_field_size:
-            assert (
-                y_true.shape[-2] > receptive_field_size
-            ), "sequence is shorter than receptive_field_size!"
-
-        # y: (batch, seq, channels=1)
-        y_true_ = y_true
-        y_pred_ = y_pred
-
-        # mask left-padded receptive field
-        if receptive_field_size and receptive_field_size > 0:
-            y_true_ = y_true_[:, receptive_field_size:, :]
-            y_pred_ = y_pred_[:, receptive_field_size:, :]
 
         # collapse channel dim for STFT (assuming 1 selected channel)
-        y_true_1d = tf.squeeze(y_true_, axis=-1)
-        y_pred_1d = tf.squeeze(y_pred_, axis=-1)
+        y_true_1d = tf.squeeze(y_true, axis=-1)
+        y_pred_1d = tf.squeeze(y_pred, axis=-1)
 
         mr_mag = tf.constant(0.0, dtype=tf.float32)
         mr_sc = tf.constant(0.0, dtype=tf.float32)
@@ -188,67 +154,78 @@ def masked_multires_stft_loss(
     return loss_fn
 
 
-def combined_masked_loss(
-    receptive_field_size: int = None,
-    use_huber_loss: bool = False,
-    alpha_mse: float = 1.0,
-    beta_stft: float = 0.2,
+def combined_loss(
+    alpha_mse: float,
+    alpha_huber: float,
+    beta_stft: float,
+    stft_fft_sizes=(256, 128, 64),
+    stft_win_lengths=(256, 128, 64),
+    stft_hop_sizes=(64, 32, 16),
     reduce_mean: bool = True,
     seq_len: int = None,
 ):
-    combined_fn, _, _ = combined_masked_loss_terms(
-        receptive_field_size,
-        use_huber_loss=use_huber_loss,
+    combined_fn, _, _, _ = combined_loss_terms(
         alpha_mse=alpha_mse,
+        alpha_huber=alpha_huber,
         beta_stft=beta_stft,
         reduce_mean=reduce_mean,
         seq_len=seq_len,
+        stft_fft_sizes=stft_fft_sizes,
+        stft_win_lengths=stft_win_lengths,
+        stft_hop_sizes=stft_hop_sizes,
     )
     return combined_fn
 
 
-def combined_masked_loss_terms(
-    receptive_field_size: int = None,
-    use_huber_loss: bool = False,
-    alpha_mse: float = 1.0,
-    beta_stft: float = 0.2,
+def combined_loss_terms(
+    alpha_mse: float,
+    alpha_huber: float,
+    beta_stft: float,
+    stft_fft_sizes=(256, 128, 64),
+    stft_win_lengths=(256, 128, 64),
+    stft_hop_sizes=(64, 32, 16),
     reduce_mean: bool = True,
     seq_len: int = None,
 ):
-    if use_huber_loss:
-        core_loss_fn = masked_huber(receptive_field_size, reduce_mean=reduce_mean)
-    else:
-        core_loss_fn = masked_mse(receptive_field_size, reduce_mean=reduce_mean)
 
-    # actually, STFT term can be spectral-only to avoid counting time MSE twice ?
-    # so can remove w_time completely (?)
-    stft_fn = masked_multires_stft_loss(
-        receptive_field_size,
+    mse_fn = mse(reduce_mean=reduce_mean)
+    huber_fn = huber(reduce_mean=reduce_mean)
+    stft_fn = multires_stft_loss(
+        fft_sizes=stft_fft_sizes,
+        hop_sizes=stft_hop_sizes,
+        win_lengths=stft_win_lengths,
         reduce_mean=reduce_mean,
         seq_len=seq_len,
     )
 
     @tf.function
     def loss_fn(y_true, y_pred):
-        return alpha_mse * core_loss_fn(y_true, y_pred) + beta_stft * stft_fn(
-            y_true, y_pred
-        )
+        loss = alpha_mse * mse_fn(y_true, y_pred)
+        loss += alpha_huber * huber_fn(y_true, y_pred)
+        loss += beta_stft * stft_fn(y_true, y_pred)
+        return loss
 
     @tf.function
-    def core_component(y_true, y_pred):
-        return core_loss_fn(y_true, y_pred)
+    def mse_component(y_true, y_pred):
+        return mse_fn(y_true, y_pred)
+
+    @tf.function
+    def huber_component(y_true, y_pred):
+        return huber_fn(y_true, y_pred)
 
     @tf.function
     def stft_component(y_true, y_pred):
         return stft_fn(y_true, y_pred)
 
     # fix named metric names for tb / keras etc
-    loss_fn.__name__ = "combined_masked_loss"
-    core_component.__name__ = "masked_huber" if use_huber_loss else "masked_mse"
-    stft_component.__name__ = "masked_stft"
+    loss_fn.__name__ = "combined_loss"
+    mse_component.__name__ = "mse"
+    huber_component.__name__ = "huber"
+    stft_component.__name__ = "stft"
 
     return (
         loss_fn,
-        core_component,
+        mse_component,
+        huber_component,
         stft_component,
     )

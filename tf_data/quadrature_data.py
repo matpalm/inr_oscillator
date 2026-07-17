@@ -7,7 +7,7 @@ from qkeras import quantized_bits
 
 FREQS = {"A2": 110, "A3": 220, "A4": 440, "A5": 880, "A6": 1760}
 
-IN_D = 4
+IN_D = 3
 OUT_D = 1
 
 
@@ -164,7 +164,11 @@ class Embed2DQuadratureData(object):
         if self.quantise_y:
             wave = self.y_quantiser(wave)
 
+        # wrapped phase angle scaled to [-1, 1) fed directly to the model
+        phase_wrapped = np.mod(phase / np.pi + 1.0, 2.0) - 1.0
+
         return {
+            "phase": phase_wrapped,
             "phase_sin": phase_sin,
             "phase_cos": phase_cos,
             "wave": wave,
@@ -208,17 +212,16 @@ class Embed2DQuadratureData(object):
 
     def _xy_from_data(self, data, embed_pt):
         # TODO: this could be a map in tf
-        N = len(data["phase_sin"])
+        N = len(data["phase"])
         x = np.zeros((N, IN_D), dtype=np.float32)
         y = np.zeros((N, OUT_D), dtype=np.float32)
-        x[:, 0] = data["phase_sin"]
-        x[:, 1] = data["phase_cos"]
+        x[:, 0] = data["phase"]
         if np.ndim(embed_pt) == 1:
-            x[:, 2] = embed_pt[0]
-            x[:, 3] = embed_pt[1]
+            x[:, 1] = embed_pt[0]
+            x[:, 2] = embed_pt[1]
         else:
-            x[:, 2] = embed_pt[:, 0]
-            x[:, 3] = embed_pt[:, 1]
+            x[:, 1] = embed_pt[:, 0]
+            x[:, 2] = embed_pt[:, 1]
 
         y[:, 0] = data["wave"]
 
