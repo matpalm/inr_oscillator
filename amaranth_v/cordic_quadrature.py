@@ -3,8 +3,7 @@ import math
 from amaranth.lib import stream, wiring, data
 from amaranth import Array, Const, Module, Signal, signed, unsigned
 
-from . import NNQ
-
+raise Exception("just use LUTs?")
 
 class CordicQuadrature(wiring.Component):
     # drop-in replacement for QuadratureGenerator: same constructor args and
