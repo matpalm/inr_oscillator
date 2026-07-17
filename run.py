@@ -5,10 +5,11 @@ from tqdm import tqdm
 from keras_v.train import build_parser, train
 
 hyperparams = {
-    "num_fourier_features": [32, 64],
-    "rff_scale": [8.0, 4.0, 2.0],
-    "mlp_layers": [2],
+    "num_fourier_features": [64, 128, 256],
+    "rff_scale": [2.0, 1.0],
+    "mlp_layers": [2, 3],
     "mlp_width": [16],
+    "beta_stft": [0.001, 0.0001],
 }
 run_configs = [
     dict(zip(hyperparams.keys(), values)) for values in product(*hyperparams.values())
@@ -23,7 +24,7 @@ def ignore(run_config):
     return False
 
 
-run_id = 77
+run_id = 83
 for run_config in tqdm(run_configs):
 
     if ignore(run_config):
@@ -41,14 +42,13 @@ for run_config in tqdm(run_configs):
 
     opts.batch_size = 128
     opts.harsh = True
-    opts.num_train_samples = 10_000
+    opts.num_train_samples = 20_000
 
     opts.base_stft_fft_size = 2048
     opts.base_stft_win_length = 256
 
     opts.alpha_mse = 0.9
     opts.alpha_huber = 0.1
-    opts.beta_stft = 0.001
     opts.beta_stft_warmup = 5
     opts.beta_stft_ramp = 5
     opts.epochs = 20
