@@ -25,7 +25,6 @@ the ``RFF_WEIGHTS_PKL`` environment variable.
 
 import json
 import os
-import pickle
 import sys
 import unittest
 from pathlib import Path
@@ -37,7 +36,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from amaranth_v import NNQ
 from amaranth_v.dense_layer import QDenseLayer
-from amaranth_v.rff_network import RffNetwork
+from amaranth_v.rff_network import RffNetwork, load_weights
 from qkeras_v.rff_lut import (
     build_io_luts,
     frac_bits,
@@ -135,8 +134,7 @@ class TestRffNetworkEquivalence(unittest.TestCase):
         pkl = _find_weights_pkl()
         if pkl is None or not pkl.exists():
             self.skipTest("no qkeras weights pickle found (set RFF_WEIGHTS_PKL)")
-        with open(pkl, "rb") as f:
-            self.weights = pickle.load(f)
+        self.weights = load_weights(pkl)
         if not {"rff", "y_pred"} <= set(self.weights):
             self.skipTest(f"{pkl} missing rff/y_pred entries; retrain")
 

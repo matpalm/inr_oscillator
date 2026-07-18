@@ -12,14 +12,12 @@ Datapath (one scalar phase + ``in_d-1`` embedding channels per sample)::
                                    -> ...
                                    -> y_pred (NNQ -> io, no relu) -> o
 
-Weights come from the qkeras pickle: ``weights[name]["weights"] == (kernel, bias)``
-for each dense layer (``mlp0 .. mlp{N-1}``, ``y_pred``) plus an ``rff`` entry
-(``{"B", "b_bits", "b_integer", "io_bits", "io_integer"}``) used to build the
-LUT feature layer.  Because the kernels/biases/tables are the very integers the
-numpy golden model uses, the hardware stays bit-exact with it.
+
 """
 
+import json
 import pickle
+from pathlib import Path
 
 import numpy as np
 from amaranth import Module, Signal
@@ -33,13 +31,46 @@ from .dense_layer import QDenseLayer
 from .rff import RandomFourierFeaturesLUT
 
 
+# fixed-point format fields for the "rff" entry that now live in
+# layer_info.json (previously duplicated into the weights pickle).
+_RFF_META_KEYS = ("b_bits", "b_integer", "io_bits", "io_integer")
+
+
+def load_weights(weights_pkl):
+    """Load the qkeras weights pickle and fold the RFF fixed-point format
+    fields back into ``weights["rff"]``.
+
+    The pickle only stores the quantised frequency matrix ``weights["rff"]["B"]``;
+    the fixed-point formats (``b_bits``/``b_integer``/``io_bits``/``io_integer``)
+    live in the ``"rff"`` entry of ``qkeras_model.layer_info.json`` (which sits at
+    the run root, three levels above ``runs/<id>/weights/qkeras/<pkl>``). This
+    reunites them so the hardware model can consume a single ``rff`` dict.
+
+    Older pickles that still carry the format fields are left untouched when the
+    layer_info entry is missing them.
+    """
+    weights_pkl = Path(weights_pkl)
+    with open(weights_pkl, "rb") as f:
+        weights = pickle.load(f)
+
+    layer_info_path = weights_pkl.parents[2] / "qkeras_model.layer_info.json"
+    if layer_info_path.exists():
+        with open(layer_info_path, "r") as f:
+            layer_info = json.load(f)
+        rff_meta = next((li for li in layer_info if li.get("type") == "rff"), None)
+        if rff_meta is not None:
+            rff = weights.setdefault("rff", {})
+            for k in _RFF_META_KEYS:
+                if k in rff_meta:
+                    rff[k] = rff_meta[k]
+    return weights
+
+
 class RffNetwork(wiring.Component):
 
     @staticmethod
     def build(weights_pkl: str, **kwargs):
-        with open(weights_pkl, "rb") as f:
-            data = pickle.load(f)
-        return RffNetwork(data, **kwargs)
+        return RffNetwork(load_weights(weights_pkl), **kwargs)
 
     def __init__(
         self,
@@ -130,10 +161,10 @@ class RffNetwork(wiring.Component):
             m.submodules[name] = mlp
             mlps.append(mlp)
 
-        wy, by = self.dense_weights_biases_for("y_pred")
+        w, b = self.dense_weights_biases_for("y_pred")
         y_pred = QDenseLayer(
-            wy,
-            by,
+            w,
+            b,
             apply_relu=False,
             in_shape=NNQ,
             out_shape=self.io_shape,
@@ -141,9 +172,7 @@ class RffNetwork(wiring.Component):
         m.submodules["y_pred"] = y_pred
 
         # ---- input split: phase -> rff, embed -> latched registers ---------
-        # the scalar phase drives the rff stream; the embedding channels are
-        # captured on the same input handshake and held until the rff features
-        # are ready to be concatenated with them.
+        # the scalar phase drives the rff stream;
         embed_reg = [
             Signal(self.io_shape, name=f"embed_reg_{j}") for j in range(self.embed_dim)
         ]
@@ -154,6 +183,8 @@ class RffNetwork(wiring.Component):
             self.i.ready.eq(rff.i.ready),
         ]
         with m.If(self.i.valid & self.i.ready):
+            # embedding channels captured on the same input handshake and held
+            # until the rff features are ready to be concatenated with them.
             for j in range(self.embed_dim):
                 m.d.sync += embed_reg[j].as_value().eq(self.i.payload[1 + j].as_value())
 

@@ -136,15 +136,26 @@ class QKerasRFFModelBuilder(object):
         phase_q = QActivation(self.io_quantiser(), name="phase_q")(phase)
         embed_q = QActivation(self.io_quantiser(), name="embed_q")(embed)
 
+        rff_b_quant = self.b_quantiser(rff_scale)
+        rff_io_quant = self.io_quantiser()
         rff = QRandomFourierFeatures(
             num_features=num_fourier_features,
             scale=rff_scale,
-            b_quantizer=self.b_quantiser(rff_scale),
-            out_quantizer=self.io_quantiser(),
+            b_quantizer=rff_b_quant,
+            out_quantizer=rff_io_quant,
             seed=rff_seed,
             name="rff",
         )(phase_q)
-        self.layer_info.append({"type": "rff", "num_features": num_fourier_features})
+        self.layer_info.append(
+            {
+                "type": "rff",
+                "num_features": num_fourier_features,
+                "b_bits": int(rff_b_quant.bits),
+                "b_integer": int(rff_b_quant.integer),
+                "io_bits": int(rff_io_quant.bits),
+                "io_integer": int(rff_io_quant.integer),
+            }
+        )
 
         h = Concatenate(name="rff_embed")([rff, embed_q])
         for i in range(mlp_layers):
@@ -161,17 +172,10 @@ class QKerasRFFModelBuilder(object):
                     "mlp_dim": mlp_dim,
                     "n_int": self.mlp_n_int,
                     "n_frac": self.mlp_n_frac,
+                    "relu_upper_bound": relu_upper_bound,
                 }
             )
             h = QActivation(self.quant_relu(relu_upper_bound), name=f"qrelu{i}")(h)
-            self.layer_info.append(
-                {
-                    "type": "relu",
-                    "upper_bound": relu_upper_bound,
-                    "n_int": self.mlp_n_int,
-                    "n_frac": self.mlp_n_frac,
-                }
-            )
 
         y_pred = QDense(
             out_d,
@@ -183,7 +187,7 @@ class QKerasRFFModelBuilder(object):
             {
                 "type": "qdense",
                 "id": "y_pred",
-                "width": out_d,
+                "mlp_dim": out_d,
                 "n_int": self.mlp_n_int,
                 "n_frac": self.mlp_n_frac,
             }
