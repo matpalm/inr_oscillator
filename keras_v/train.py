@@ -34,8 +34,8 @@ def train(opts):
     with open(run_path / "opts.json", "w") as f:
         json.dump(vars(opts), f, default=str)
 
-    IN_D = 3  # phase, embed0, embed1
-    OUT_D = 1  # output wave
+    in_d = 3  # phase, embed0, embed1
+    out_d = 1  # output wave
     TRAIN_SEQ_LEN = 4 * opts.base_stft_win_length
     TEST_SEQ_LEN = 2048
     print("TRAIN_SEQ_LEN", TRAIN_SEQ_LEN)
@@ -65,12 +65,12 @@ def train(opts):
 
     # make model
     model_config = {
-        "in_d": IN_D,
+        "in_d": in_d,
         "num_fourier_features": opts.num_fourier_features,
         "rff_scale": opts.rff_scale,
         "mlp_layers": opts.mlp_layers,
-        "mlp_width": opts.mlp_width,
-        "out_d": OUT_D,
+        "mlp_dim": opts.mlp_dim,
+        "out_d": out_d,
         "rff_seed": opts.rff_seed,
     }
     print("model_config", model_config)
@@ -166,7 +166,7 @@ def build_parser():
     )
     parser.add_argument("--rff-seed", type=int, default=0)
     parser.add_argument("--mlp-layers", type=int, default=2)
-    parser.add_argument("--mlp-width", type=int, default=16)
+    parser.add_argument("--mlp-dim", type=int, default=16)
     parser.add_argument(
         "--alpha-mse",
         type=float,

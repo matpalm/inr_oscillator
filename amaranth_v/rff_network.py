@@ -77,27 +77,27 @@ class RffNetwork(wiring.Component):
 
         # first mlp consumes 2*num_features rff outputs + the embedding channels.
         w0, _b0 = self.dense_weights_biases_for(self.mlp_names[0])
-        self.MLP_WIDTH = int(w0.shape[1])
-        self.EMBED_D = int(w0.shape[0]) - 2 * self.num_features
+        self.mlp_dim = int(w0.shape[1])
+        self.embed_dim = int(w0.shape[0]) - 2 * self.num_features
         assert (
-            self.EMBED_D >= 0
+            self.embed_dim >= 0
         ), f"mlp0 in_d={w0.shape[0]} < 2*num_features={2 * self.num_features}"
-        self.IN_D = self.EMBED_D + 1  # + scalar phase
+        self.in_d = self.embed_dim + 1  # + scalar phase
 
         wy, _by = self.dense_weights_biases_for("y_pred")
-        self.OUT_D = int(wy.shape[1])
+        self.out_d = int(wy.shape[1])
 
         print(
-            f">RffNetwork in_d={self.IN_D} embed_d={self.EMBED_D}"
+            f">RffNetwork in_d={self.in_d} embed_dim={self.embed_dim}"
             f" num_features={self.num_features} mlp_layers={len(self.mlp_names)}"
-            f" mlp_width={self.MLP_WIDTH} out_d={self.OUT_D}"
+            f" mlp_dim={self.mlp_dim} out_d={self.out_d}"
             f" io_shape={self.io_shape!r} lut_size={self.lut_size}"
         )
 
         super().__init__(
             {
-                "i": In(stream.Signature(data.ArrayLayout(self.io_shape, self.IN_D))),
-                "o": Out(stream.Signature(data.ArrayLayout(self.io_shape, self.OUT_D))),
+                "i": In(stream.Signature(data.ArrayLayout(self.io_shape, self.in_d))),
+                "o": Out(stream.Signature(data.ArrayLayout(self.io_shape, self.out_d))),
             }
         )
 
@@ -145,7 +145,7 @@ class RffNetwork(wiring.Component):
         # captured on the same input handshake and held until the rff features
         # are ready to be concatenated with them.
         embed_reg = [
-            Signal(self.io_shape, name=f"embed_reg_{j}") for j in range(self.EMBED_D)
+            Signal(self.io_shape, name=f"embed_reg_{j}") for j in range(self.embed_dim)
         ]
 
         m.d.comb += [
@@ -154,7 +154,7 @@ class RffNetwork(wiring.Component):
             self.i.ready.eq(rff.i.ready),
         ]
         with m.If(self.i.valid & self.i.ready):
-            for j in range(self.EMBED_D):
+            for j in range(self.embed_dim):
                 m.d.sync += embed_reg[j].as_value().eq(self.i.payload[1 + j].as_value())
 
         # ---- concat(rff, embed) -> mlp0 ------------------------------------
@@ -165,7 +165,7 @@ class RffNetwork(wiring.Component):
         ]
         for k in range(num_rff):
             m.d.comb += mlp0.i.payload[k].as_value().eq(rff.o.payload[k])
-        for j in range(self.EMBED_D):
+        for j in range(self.embed_dim):
             m.d.comb += (
                 mlp0.i.payload[num_rff + j].as_value().eq(embed_reg[j].as_value())
             )

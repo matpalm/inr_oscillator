@@ -52,7 +52,7 @@ class QDenseLayer(wiring.Component):
         Args:
             np_kernel   (IN_D, OUT_D)   qkeras QDense kernel
             np_bias     (OUT_D,)|None   qkeras QDense bias (double-width), or None
-            apply_relu                  apply the relu clamp in post-process
+            apply_relu                  whether to run relu
             relu_upper_bound            upper bound for the relu (required if apply_relu)
             in_shape                    fixed-point shape of the input activations
                                         (NNQ for later layers, io shape for the first)
@@ -66,12 +66,12 @@ class QDenseLayer(wiring.Component):
                 f"but received {np_kernel.shape}"
             )
 
-        self.IN_D, self.OUT_D = np_kernel.shape
+        self.in_d, self.out_d = np_kernel.shape
 
         if np_bias is not None:
-            if len(np_bias.shape) != 1 or np_bias.shape[0] != self.OUT_D:
+            if len(np_bias.shape) != 1 or np_bias.shape[0] != self.out_d:
                 raise Exception(
-                    f"Expect QDenseLayer bias with shape ({self.OUT_D},) "
+                    f"Expect QDenseLayer bias with shape ({self.out_d},) "
                     f"but received {np_bias.shape}"
                 )
 
@@ -79,7 +79,7 @@ class QDenseLayer(wiring.Component):
             raise Exception("relu_upper_bound is required when apply_relu is set")
 
         print(
-            f">QDenseLayer IN_D={self.IN_D} OUT_D={self.OUT_D} apply_relu={apply_relu}"
+            f">QDenseLayer IN_D={self.in_d} OUT_D={self.out_d} apply_relu={apply_relu}"
             f" ( relu_upper_bound={relu_upper_bound} )"
             f" in_shape={in_shape!r} out_shape={out_shape!r}"
         )
@@ -89,16 +89,16 @@ class QDenseLayer(wiring.Component):
         self.out_shape = out_shape
 
         self.acc_shape, self.prod_shift = self.acc_shape_for(
-            in_shape, self.IN_D, np_bias
+            in_shape, self.in_d, np_bias
         )
 
-        self.num_weights = self.IN_D * self.OUT_D
+        self.num_weights = self.in_d * self.out_d
 
         # Flattened as [out_d][in_d], row-major.
         weight_rows = np_kernel.T
         weight_init = []
-        for o in range(self.OUT_D):
-            for i in range(self.IN_D):
+        for o in range(self.out_d):
+            for i in range(self.in_d):
                 try:
                     weight_init.append(parse_nnq(weight_rows[o][i], shape=NNQ))
                 except ValueError as e:
@@ -120,12 +120,12 @@ class QDenseLayer(wiring.Component):
             bias_init = [parse_nnq(b, shape=self.acc_shape) for b in np_bias]
         else:
             bias_init = [
-                parse_nnq(0.0, shape=self.acc_shape) for _ in range(self.OUT_D)
+                parse_nnq(0.0, shape=self.acc_shape) for _ in range(self.out_d)
             ]
 
         self.bias_mem = Memory(
             shape=self.acc_shape,
-            depth=self.OUT_D,
+            depth=self.out_d,
             init=bias_init,
             attrs={"ram_style": "block"},
         )
@@ -133,35 +133,31 @@ class QDenseLayer(wiring.Component):
         self.accumulator = Signal(self.acc_shape, name="qdense_running_accum", init=0)
 
         self.input = Array(
-            Signal(in_shape, name=f"qdense_in_{i}", init=0) for i in range(self.IN_D)
+            Signal(in_shape, name=f"qdense_in_{i}", init=0) for i in range(self.in_d)
         )
-        self.i_idx = Signal(range(self.IN_D), init=0)
+        self.i_idx = Signal(range(self.in_d), init=0)
 
         self.result = Array(
             Signal(out_shape, name=f"qdense_result_{j}", init=0)
-            for j in range(self.OUT_D)
+            for j in range(self.out_d)
         )
-        self.o_idx = Signal(range(self.OUT_D), init=0)
+        self.o_idx = Signal(range(self.out_d), init=0)
 
         if apply_relu:
             self.relu_upper_bound = fixed.Const(relu_upper_bound, shape=self.acc_shape)
 
-        # clip to representable out_shape bounds (expressed at the accumulator
-        # scale) before narrowing acc_shape -> out_shape. note: can't use fixed
-        # Value utils (clamp) directly since we're matching FXPmath/qkeras which
-        # does things slightly differently.
         self.lower_bound = fixed.Const(
-            out_shape.min().as_float(), shape=self.acc_shape
+            out_shape.min().as_float(), shape=self.acc_shape, clamp=True
         ).as_value()
         self.upper_bound = fixed.Const(
-            out_shape.max().as_float(), shape=self.acc_shape
+            out_shape.max().as_float(), shape=self.acc_shape, clamp=True
         ).as_value()
 
         super().__init__(
             {
-                "i": wiring.In(stream.Signature(data.ArrayLayout(in_shape, self.IN_D))),
+                "i": wiring.In(stream.Signature(data.ArrayLayout(in_shape, self.in_d))),
                 "o": wiring.Out(
-                    stream.Signature(data.ArrayLayout(out_shape, self.OUT_D))
+                    stream.Signature(data.ArrayLayout(out_shape, self.out_d))
                 ),
             }
         )
@@ -205,7 +201,7 @@ class QDenseLayer(wiring.Component):
             rd_b.addr.eq(0),
         ]
 
-        for j in range(self.OUT_D):
+        for j in range(self.out_d):
             m.d.comb += self.o.payload[j].eq(self.result[j])
 
         frac_drop = self.acc_shape.f_bits - self.out_shape.f_bits
@@ -217,7 +213,7 @@ class QDenseLayer(wiring.Component):
             with m.State("IDLE"):
                 m.d.comb += self.i.ready.eq(1)
                 with m.If(self.i.valid & self.i.ready):
-                    for i in range(self.IN_D):
+                    for i in range(self.in_d):
                         m.d.sync += self.input[i].eq(self.i.payload[i])
                     m.d.sync += [
                         self.i_idx.eq(0),
@@ -239,7 +235,7 @@ class QDenseLayer(wiring.Component):
                 # prep read of first weight for this column
                 m.d.comb += [
                     rd_w.en.eq(1),
-                    rd_w.addr.eq(self.o_idx * self.IN_D + self.i_idx),
+                    rd_w.addr.eq(self.o_idx * self.in_d + self.i_idx),
                 ]
                 m.next = "LOAD_MUL_INPUTS"
 
@@ -257,13 +253,13 @@ class QDenseLayer(wiring.Component):
                     self.accumulator.as_value().as_signed()
                     + ((mul_a * mul_b) << self.prod_shift)
                 )
-                with m.If(self.i_idx == self.IN_D - 1):
+                with m.If(self.i_idx == self.in_d - 1):
                     m.next = "POST_PROCESS"
                 with m.Else():
                     m.d.sync += self.i_idx.eq(self.i_idx + 1)
                     m.d.comb += [
                         rd_w.en.eq(1),
-                        rd_w.addr.eq(self.o_idx * self.IN_D + self.i_idx + 1),
+                        rd_w.addr.eq(self.o_idx * self.in_d + self.i_idx + 1),
                     ]
                     m.next = "LOAD_MUL_INPUTS"
 
@@ -308,7 +304,7 @@ class QDenseLayer(wiring.Component):
                 )
 
                 m.d.sync += self.i_idx.eq(0)
-                with m.If(self.o_idx == self.OUT_D - 1):
+                with m.If(self.o_idx == self.out_d - 1):
                     m.next = "DONE"
                 with m.Else():
                     m.d.sync += self.o_idx.eq(self.o_idx + 1)

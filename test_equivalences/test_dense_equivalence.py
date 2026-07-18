@@ -48,13 +48,14 @@ def golden(
         (N, OUT_D) out_shape raw integer codes
     """
 
-    W = acc_shape.width
-    dw_mask = (1 << W) - 1
     frac_drop = acc_shape.f_bits - out_shape.f_bits
     out_width = out_shape.width
 
-    lower = fixed.Const(out_shape.min().as_float(), shape=acc_shape)._value
-    upper = fixed.Const(out_shape.max().as_float(), shape=acc_shape)._value
+    # clamp=True: when out_shape's integer range is wider than the accumulator
+    # (e.g. the io regression shape), saturate the bounds to acc_shape -- the
+    # accumulator can never exceed its own range, so the clamp is a no-op.
+    lower = fixed.Const(out_shape.min().as_float(), shape=acc_shape, clamp=True)._value
+    upper = fixed.Const(out_shape.max().as_float(), shape=acc_shape, clamp=True)._value
     if apply_relu:
         relu_ub = fixed.Const(relu_upper_bound, shape=acc_shape)._value
 
@@ -81,13 +82,17 @@ def golden(
             # re-clip
             acc = min(max(acc, lower), upper)
 
-            # truncate toward zero while narrowing NNQ_DW -> out_shape
-            u = acc & dw_mask
-            sign_bit = (u >> (W - 1)) & 1
-            frac_nonzero = (u & ((1 << frac_drop) - 1)) != 0
-            if sign_bit and frac_nonzero:
-                u = (u + (1 << frac_drop)) & dw_mask
-            sliced = (u >> frac_drop) & ((1 << out_width) - 1)
+            # truncate toward zero while narrowing acc_shape -> out_shape.
+            # operate on the signed accumulator and arithmetic-shift so the sign
+            # is extended across out_width even when out_shape is wider than the
+            # accumulator (the io regression shape); this matches the hardware's
+            # signed slice trunc_toward_zero[frac_drop:frac_drop+out_width].
+            frac_nonzero = (acc & ((1 << frac_drop) - 1)) != 0
+            if acc < 0 and frac_nonzero:
+                trunc = acc + (1 << frac_drop)
+            else:
+                trunc = acc
+            sliced = (trunc >> frac_drop) & ((1 << out_width) - 1)
             if sliced >= (1 << (out_width - 1)):
                 sliced -= 1 << out_width
             result[row, o] = sliced
@@ -97,8 +102,8 @@ def golden(
 
 def simulate(dut, x_codes):
     """Drive the Amaranth QDenseLayer over ``x_codes`` and collect output codes."""
-    in_d = dut.IN_D
-    out_d = dut.OUT_D
+    in_d = dut.in_d
+    out_d = dut.out_d
     results = []
 
     async def testbench(ctx):
@@ -124,13 +129,13 @@ def simulate(dut, x_codes):
 
 
 class TestDenseEquivalence(unittest.TestCase):
-    IN_D = 6
-    OUT_D = 4
-    ROWS = 64
-    SEED = 0
+    in_d = 6
+    out_d = 4
+    rows = 64
+    seed = 0
 
     def _check(self, apply_relu, relu_upper_bound, out_shape, in_shape=NNQ):
-        rng = np.random.default_rng(self.SEED)
+        rng = np.random.default_rng(self.seed)
         n_frac = NNQ.f_bits
         in_frac = in_shape.f_bits
         acc_f = in_frac + n_frac
@@ -139,14 +144,14 @@ class TestDenseEquivalence(unittest.TestCase):
         w_lo, w_hi = NNQ.min().as_float(), NNQ.max().as_float()
         in_lo, in_hi = in_shape.min().as_float(), in_shape.max().as_float()
         kernel = (
-            np.round(rng.uniform(w_lo, w_hi, (self.IN_D, self.OUT_D)) * 2**n_frac)
+            np.round(rng.uniform(w_lo, w_hi, (self.in_d, self.out_d)) * 2**n_frac)
             / 2**n_frac
         )
         inputs = (
-            np.round(rng.uniform(in_lo, in_hi, (self.ROWS, self.IN_D)) * 2**in_frac)
+            np.round(rng.uniform(in_lo, in_hi, (self.rows, self.in_d)) * 2**in_frac)
             / 2**in_frac
         )
-        bias = np.round(rng.uniform(w_lo, w_hi, (self.OUT_D,)) * 2**acc_f) / 2**acc_f
+        bias = np.round(rng.uniform(w_lo, w_hi, (self.out_d,)) * 2**acc_f) / 2**acc_f
 
         w_codes = np.round(kernel * 2**n_frac).astype(np.int64)
         x_codes = np.round(inputs * 2**in_frac).astype(np.int64)

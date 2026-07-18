@@ -50,8 +50,8 @@ from test_equivalences.test_dense_equivalence import golden as dense_golden
 
 def simulate(net, sample_codes):
     """Drive the Amaranth RffNetwork over ``sample_codes`` (N, IN_D) io codes."""
-    in_d = net.IN_D
-    out_d = net.OUT_D
+    in_d = net.in_d
+    out_d = net.out_d
     results = []
 
     async def testbench(ctx):
@@ -159,12 +159,12 @@ class TestRffNetworkEquivalence(unittest.TestCase):
 
         rng = np.random.default_rng(self.SEED)
         phases = np.linspace(-1.0, 1.0, self.NUM_SAMPLES, endpoint=False)
-        embed = rng.uniform(-1.0, 1.0, (self.NUM_SAMPLES, net.EMBED_D))
+        embed = rng.uniform(-1.0, 1.0, (self.NUM_SAMPLES, net.embed_dim))
 
         phase_codes = quantise_to_codes(phases, io_bits, io_integer)
         embed_codes = (
             quantise_to_codes(embed, io_bits, io_integer)
-            if net.EMBED_D
+            if net.embed_dim
             else np.zeros((self.NUM_SAMPLES, 0), dtype=np.int64)
         )
         sample_codes = np.concatenate([phase_codes.reshape(-1, 1), embed_codes], axis=1)

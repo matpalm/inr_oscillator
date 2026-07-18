@@ -2,13 +2,13 @@ from itertools import product
 
 from tqdm import tqdm
 
-from keras_v.train import build_parser, train
+from qkeras_v.train import build_parser, train
 
 hyperparams = {
     "num_fourier_features": [64, 128, 256],
     "rff_scale": [2.0, 1.0],
     "mlp_layers": [2, 3],
-    "mlp_width": [16],
+    "mlp_dim": [16],
     "beta_stft": [0.001, 0.0001],
 }
 run_configs = [

@@ -109,7 +109,7 @@ class QKerasRFFModelBuilder(object):
         num_fourier_features: int,
         rff_scale: float,
         mlp_layers: int,
-        mlp_width: int,
+        mlp_dim: int,
         out_d: int,
         relu_upper_bound: float,
         rff_seed: int = 0,
@@ -149,16 +149,29 @@ class QKerasRFFModelBuilder(object):
         h = Concatenate(name="rff_embed")([rff, embed_q])
         for i in range(mlp_layers):
             h = QDense(
-                mlp_width,
+                mlp_dim,
                 kernel_quantizer=self.quantiser(),
                 bias_quantizer=self.quantiser(double_width=True),
                 name=f"mlp{i}",
             )(h)
             self.layer_info.append(
-                {"type": "qdense", "id": f"mlp{i}", "width": mlp_width}
+                {
+                    "type": "qdense",
+                    "id": f"mlp{i}",
+                    "mlp_dim": mlp_dim,
+                    "n_int": self.mlp_n_int,
+                    "n_frac": self.mlp_n_frac,
+                }
             )
             h = QActivation(self.quant_relu(relu_upper_bound), name=f"qrelu{i}")(h)
-            self.layer_info.append({"type": "relu", "upper_bound": relu_upper_bound})
+            self.layer_info.append(
+                {
+                    "type": "relu",
+                    "upper_bound": relu_upper_bound,
+                    "n_int": self.mlp_n_int,
+                    "n_frac": self.mlp_n_frac,
+                }
+            )
 
         y_pred = QDense(
             out_d,
@@ -166,7 +179,15 @@ class QKerasRFFModelBuilder(object):
             bias_quantizer=self.quantiser(double_width=True),
             name="y_pred",
         )(h)
-        self.layer_info.append({"type": "qdense", "id": "y_pred", "width": out_d})
+        self.layer_info.append(
+            {
+                "type": "qdense",
+                "id": "y_pred",
+                "width": out_d,
+                "n_int": self.mlp_n_int,
+                "n_frac": self.mlp_n_frac,
+            }
+        )
 
         # TODO: should we keep this as self.quantiser as cdcc did?
         y_pred = QActivation(self.io_quantiser(), name="qout")(y_pred)

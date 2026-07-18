@@ -70,7 +70,7 @@ def create_rff_inr_model(
     num_fourier_features: int,
     rff_scale: float,
     mlp_layers: int,
-    mlp_width: int,
+    mlp_dim: int,
     out_d: int,
     rff_seed: int = 0,
 ):
@@ -96,7 +96,7 @@ def create_rff_inr_model(
 
     h = Concatenate(name="rff_embed")([rff, embed])
     for i in range(mlp_layers):
-        h = Dense(mlp_width, activation="relu", name=f"mlp{i}")(h)
+        h = Dense(mlp_dim, activation="relu", name=f"mlp{i}")(h)
 
     y_pred = Dense(out_d, activation=None, name="y_pred")(h)
 
