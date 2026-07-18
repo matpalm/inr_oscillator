@@ -111,17 +111,18 @@ def train(opts):
         print("init weights from", init_weights_path)
         train_model.load_weights(init_weights_path)
 
-    with open(run_path / "qkeras_model.fp_config.json", "w") as f:
-        json.dump(
-            {
-                "n_int": builder.mlp_n_int,
-                "n_frac": builder.mlp_n_frac,
-                "io_n_int": builder.io_n_int,
-                "io_n_frac": builder.io_n_frac,
-                "init_weights_path": init_weights_path,
-            },
-            f,
-        )
+    # not useful anymore? ( with everything baked into layer_info.json )
+    # with open(run_path / "qkeras_model.fp_config.json", "w") as f:
+    #     json.dump(
+    #         {
+    #             "n_int": builder.mlp_n_int,
+    #             "n_frac": builder.mlp_n_frac,
+    #             "io_n_int": builder.io_n_int,
+    #             "io_n_frac": builder.io_n_frac,
+    #             "init_weights_path": init_weights_path,
+    #         },
+    #         f,
+    #     )
 
     ramp_callback, beta_stft = setup_beta_stft_var_and_update_callback(
         opts.epochs, opts.beta_stft_warmup, opts.beta_stft_ramp, opts.beta_stft

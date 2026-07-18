@@ -23,7 +23,6 @@ By default it uses the newest ``runs/*/weights/qkeras/latest.pkl``; override wit
 the ``RFF_WEIGHTS_PKL`` environment variable.
 """
 
-import json
 import os
 import sys
 import unittest
@@ -92,11 +91,12 @@ def build_reference(net, phase_codes, embed_codes):
 
     # MLP chain (io -> NNQ for the first layer, NNQ -> NNQ afterwards) + y_pred.
     in_shape = net.io_shape
-    layer_specs = [(name, True, NNQ) for name in net.mlp_names]
-    layer_specs.append(("y_pred", False, net.io_shape))
-    for name, apply_relu, out_shape in layer_specs:
+    layer_specs = [(name, NNQ) for name in net.mlp_names]
+    layer_specs.append(("y_pred", net.io_shape))
+    for name, out_shape in layer_specs:
         w, b = net.dense_weights_biases_for(name)
-        relu_ub = net.relu_upper_bound if apply_relu else None
+        relu_ub = net.relu_upper_bound_for(name)
+        apply_relu = relu_ub is not None
         acc_shape, prod_shift = QDenseLayer.acc_shape_for(in_shape, w.shape[0], b)
         w_codes = np.round(w * (2.0**NNQ.f_bits)).astype(np.int64)
         b_codes_l = np.round(b * (2.0**acc_shape.f_bits)).astype(np.int64)
@@ -138,18 +138,10 @@ class TestRffNetworkEquivalence(unittest.TestCase):
         if not {"rff", "y_pred"} <= set(self.weights):
             self.skipTest(f"{pkl} missing rff/y_pred entries; retrain")
 
-        # real model_config (for the relu upper bound); fall back to the default.
-        self.relu_upper_bound = 8.0
-        cfg = pkl.parents[2] / "model_config.json"
-        if cfg.exists():
-            with open(cfg, "r") as f:
-                self.relu_upper_bound = float(json.load(f).get("relu_upper_bound", 8.0))
-
     def test_network_bit_exact(self):
         net = RffNetwork(
             self.weights,
             lut_size=self.LUT_SIZE,
-            relu_upper_bound=self.relu_upper_bound,
         )
 
         rff = self.weights["rff"]

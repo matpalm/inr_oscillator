@@ -63,6 +63,11 @@ def load_weights(weights_pkl):
             for k in _RFF_META_KEYS:
                 if k in rff_meta:
                     rff[k] = rff_meta[k]
+        for li in layer_info:
+            if li.get("type") == "qdense" and "relu_upper_bound" in li:
+                layer = weights.get(li.get("id"))
+                if isinstance(layer, dict):
+                    layer["relu_upper_bound"] = li["relu_upper_bound"]
     return weights
 
 
@@ -76,17 +81,15 @@ class RffNetwork(wiring.Component):
         self,
         qkeras_weights: dict,
         lut_size: int = 1024,
-        relu_upper_bound: float = 8.0,
     ):
         """
         Args:
-            qkeras_weights    dict from the qkeras pickle (dense layers + "rff")
+            qkeras_weights    dict from the qkeras pickle (dense layers + "rff").
             lut_size          cos/sin ROM depth for the RFF layer
-            relu_upper_bound  upper bound of the MLP relu activations
         """
+
         self.qkeras_weights = qkeras_weights
         self.lut_size = int(lut_size)
-        self.relu_upper_bound = float(relu_upper_bound)
 
         # dense layers in order: every "mlp{idx}" then the "y_pred" regressor.
         self.mlp_names = sorted(
@@ -136,6 +139,10 @@ class RffNetwork(wiring.Component):
         w, b = self.qkeras_weights[name]["weights"]
         return np.asarray(w), np.asarray(b)
 
+    def relu_upper_bound_for(self, name: str):
+        """Per-layer relu upper bound from layer_info (None => no relu)."""
+        return self.qkeras_weights.get(name, {}).get("relu_upper_bound")
+
     def elaborate(self, platform):
         m = Module()
 
@@ -150,11 +157,12 @@ class RffNetwork(wiring.Component):
         mlps = []
         for idx, name in enumerate(self.mlp_names):
             w, b = self.dense_weights_biases_for(name)
+            relu_ub = self.relu_upper_bound_for(name)
             mlp = QDenseLayer(
                 w,
                 b,
-                apply_relu=True,
-                relu_upper_bound=self.relu_upper_bound,
+                apply_relu=relu_ub is not None,
+                relu_upper_bound=relu_ub,
                 in_shape=self.io_shape if idx == 0 else NNQ,
                 out_shape=NNQ,
             )

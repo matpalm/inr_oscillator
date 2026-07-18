@@ -1,8 +1,8 @@
 """Bit-exact equivalence check: qkeras_v RFF golden model vs amaranth_v hardware.
 
-Loads a pickled set of qkeras quantised weights (which now carries the fixed,
-quantised RFF ``B`` matrix and its fixed-point formats), builds the shared cos/sin
-LUT, then:
+Loads a pickled set of qkeras quantised weights (the quantised RFF ``B`` matrix)
+along with the sibling ``qkeras_model.layer_info.json`` (which carries the RFF
+fixed-point formats) via ``load_weights``, builds the shared cos/sin LUT, then:
 
   * computes the golden RFF integer codes in numpy (``qkeras_v.rff_lut``), and
   * simulates the Amaranth ``RandomFourierFeaturesLUT`` fed the identical LUT/B,
@@ -18,7 +18,6 @@ the ``RFF_WEIGHTS_PKL`` environment variable.
 """
 
 import os
-import pickle
 import sys
 import unittest
 from pathlib import Path
@@ -29,6 +28,7 @@ from amaranth.sim import Simulator
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from amaranth_v.rff import RandomFourierFeaturesLUT
+from amaranth_v.rff_network import load_weights
 from qkeras_v.rff_lut import (
     build_io_luts,
     frac_bits,
@@ -81,8 +81,7 @@ class TestRffEquivalence(unittest.TestCase):
         pkl = _find_weights_pkl()
         if pkl is None or not pkl.exists():
             self.skipTest("no qkeras weights pickle found (set RFF_WEIGHTS_PKL)")
-        with open(pkl, "rb") as f:
-            weights = pickle.load(f)
+        weights = load_weights(pkl)
         if "rff" not in weights:
             self.skipTest(
                 f"{pkl} has no 'rff' entry; retrain with the updated qkeras_v.train"

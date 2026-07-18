@@ -206,14 +206,7 @@ class QKerasRFFModelBuilder(object):
 
 def create_rff_inr_model_from_config_and_latest_ckpt(run: str):
     run_dir_path = Path("runs") / run
-    with open(run_dir_path / "qkeras_model.fp_config.json", "r") as f:
-        fp_config = json.load(f)
-    builder = QKerasRFFModelBuilder(
-        mlp_n_int=fp_config["n_int"],
-        mlp_n_frac=fp_config["n_frac"],
-        io_n_int=fp_config["io_n_int"],
-        io_n_frac=fp_config["io_n_frac"],
-    )
+    builder = QKerasRFFModelBuilder()
     with open(run_dir_path / "model_config.json", "r") as f:
         model_config = json.load(f)
     print("model_config", model_config)
