@@ -28,7 +28,7 @@ from amaranth.sim import Simulator
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from amaranth_v.rff import RandomFourierFeaturesLUT
-from amaranth_v.rff_network import load_weights
+from amaranth_v.rff_network import load_weights_and_config
 from qkeras_v.rff_lut import (
     build_io_luts,
     frac_bits,
@@ -36,7 +36,6 @@ from qkeras_v.rff_lut import (
     quantise_to_codes,
     rff_lut_features,
 )
-
 
 def simulate(dut, phase_codes):
     """Drive the Amaranth RFF over ``phase_codes`` and collect output integer codes."""
@@ -74,47 +73,47 @@ def _find_weights_pkl():
 
 
 class TestRffEquivalence(unittest.TestCase):
-    LUT_SIZE = 1024
     NUM_PHASES = 257
 
     def setUp(self):
         pkl = _find_weights_pkl()
         if pkl is None or not pkl.exists():
             self.skipTest("no qkeras weights pickle found (set RFF_WEIGHTS_PKL)")
-        weights = load_weights(pkl)
+        weights, self.quant_sizes, model_config = load_weights_and_config(pkl)
         if "rff" not in weights:
             self.skipTest(
                 f"{pkl} has no 'rff' entry; retrain with the updated qkeras_v.train"
             )
-        self.rff = weights["rff"]
+        self.rff_w = weights["rff"]
+        self.lut_size = model_config["rff"]["lut_size"]
 
     def test_rff_bit_exact(self):
-        rff = self.rff
-        b_bits, b_integer = int(rff["b_bits"]), int(rff["b_integer"])
-        io_bits, io_integer = int(rff["io_bits"]), int(rff["io_integer"])
+
+        b_bits, b_integer = self.quant_sizes["b_bits"], self.quant_sizes["b_int"]
+        io_bits, io_integer = self.quant_sizes["io_bits"], self.quant_sizes["io_int"]
 
         # RFF input is the scalar phase (in_dim == 1); B is (in_dim, num_features).
-        B = np.asarray(rff["B"]).reshape(-1)
+        B = np.asarray(self.rff_w["B"]).reshape(-1)
         b_f = frac_bits(b_bits, b_integer)
         b_codes = np.round(B * (2.0**b_f)).astype(np.int64)
 
         shift, lut_bits = plan_shift(
-            io_bits, io_integer, b_bits, b_integer, self.LUT_SIZE
+            io_bits, io_integer, b_bits, b_integer, self.lut_size
         )
         self.assertGreaterEqual(
             shift,
             0,
-            f"lut_size {self.LUT_SIZE} too large for io_frac+b_frac="
+            f"lut_size {self.lut_size} too large for io_frac+b_frac="
             f"{frac_bits(io_bits, io_integer) + b_f}",
         )
-        cos_lut, sin_lut = build_io_luts(self.LUT_SIZE, io_bits, io_integer)
+        cos_lut, sin_lut = build_io_luts(self.lut_size, io_bits, io_integer)
 
         phases = np.linspace(-1.0, 1.0, self.NUM_PHASES, endpoint=False)
         phase_codes = quantise_to_codes(phases, io_bits, io_integer)
 
         ref = rff_lut_features(phase_codes, b_codes, cos_lut, sin_lut, shift, lut_bits)
 
-        dut = RandomFourierFeaturesLUT.from_rff(rff, lut_size=self.LUT_SIZE)
+        dut = RandomFourierFeaturesLUT.from_rff(B, self.quant_sizes, self.lut_size)
         hw = simulate(dut, phase_codes)
 
         self.assertEqual(ref.shape, hw.shape)

@@ -31,65 +31,36 @@ from .dense_layer import QDenseLayer
 from .rff import RandomFourierFeaturesLUT
 
 
-# fixed-point format fields for the "rff" entry that now live in
-# layer_info.json (previously duplicated into the weights pickle).
-_RFF_META_KEYS = ("b_bits", "b_integer", "io_bits", "io_integer")
-
-
-def load_weights(weights_pkl):
-    """Load the qkeras weights pickle and fold the RFF fixed-point format
-    fields back into ``weights["rff"]``.
-
-    The pickle only stores the quantised frequency matrix ``weights["rff"]["B"]``;
-    the fixed-point formats (``b_bits``/``b_integer``/``io_bits``/``io_integer``)
-    live in the ``"rff"`` entry of ``qkeras_model.layer_info.json`` (which sits at
-    the run root, three levels above ``runs/<id>/weights/qkeras/<pkl>``). This
-    reunites them so the hardware model can consume a single ``rff`` dict.
-
-    Older pickles that still carry the format fields are left untouched when the
-    layer_info entry is missing them.
-    """
+def load_weights_and_config(weights_pkl):
+    """Load the qkeras weights pickle and the model_config.json"""
     weights_pkl = Path(weights_pkl)
     with open(weights_pkl, "rb") as f:
         weights = pickle.load(f)
-
-    layer_info_path = weights_pkl.parents[2] / "qkeras_model.layer_info.json"
-    if layer_info_path.exists():
-        with open(layer_info_path, "r") as f:
-            layer_info = json.load(f)
-        rff_meta = next((li for li in layer_info if li.get("type") == "rff"), None)
-        if rff_meta is not None:
-            rff = weights.setdefault("rff", {})
-            for k in _RFF_META_KEYS:
-                if k in rff_meta:
-                    rff[k] = rff_meta[k]
-        for li in layer_info:
-            if li.get("type") == "qdense" and "relu_upper_bound" in li:
-                layer = weights.get(li.get("id"))
-                if isinstance(layer, dict):
-                    layer["relu_upper_bound"] = li["relu_upper_bound"]
-    return weights
+    model_config_path = weights_pkl.parents[2] / "model_config.json"
+    with open(model_config_path, "r") as f:
+        model_config = json.load(f)
+    quant_sizes_path = weights_pkl.parents[2] / "quant_sizes.json"
+    with open(quant_sizes_path, "r") as f:
+        quant_sizes = json.load(f)
+    return weights, quant_sizes, model_config
 
 
 class RffNetwork(wiring.Component):
 
     @staticmethod
     def build(weights_pkl: str, **kwargs):
-        return RffNetwork(load_weights(weights_pkl), **kwargs)
+        return RffNetwork(*load_weights_and_config(weights_pkl), **kwargs)
 
-    def __init__(
-        self,
-        qkeras_weights: dict,
-        lut_size: int = 1024,
-    ):
+    def __init__(self, qkeras_weights: dict, quant_sizes: dict, model_config: dict):
         """
         Args:
             qkeras_weights    dict from the qkeras pickle (dense layers + "rff").
-            lut_size          cos/sin ROM depth for the RFF layer
+            quant_sizes       for other config as required
+            model_config      for other config as required
         """
 
         self.qkeras_weights = qkeras_weights
-        self.lut_size = int(lut_size)
+        self.quant_sizes = quant_sizes
 
         # dense layers in order: every "mlp{idx}" then the "y_pred" regressor.
         self.mlp_names = sorted(
@@ -102,12 +73,14 @@ class RffNetwork(wiring.Component):
 
         # io fixed-point shape from the rff entry (qkeras quantized_bits: 1 sign
         # bit + `integer` int bits + the rest fractional).
-        rff = qkeras_weights["rff"]
-        io_bits, io_integer = int(rff["io_bits"]), int(rff["io_integer"])
+        rff_w = qkeras_weights["rff"]
+        io_bits, io_integer = quant_sizes["io_bits"], quant_sizes["io_int"]
         self.io_shape = fixed.SQ(io_integer + 1, io_bits - io_integer - 1)
+        self.lut_size = model_config["rff"]["lut_size"]
 
         # number of fourier features (B is (in_dim=1, num_features)).
-        self.num_features = int(np.asarray(rff["B"]).reshape(-1).shape[0])
+        self.num_features = int(np.asarray(rff_w["B"]).reshape(-1).shape[0])
+        assert self.num_features == model_config["rff"]["num_features"]
 
         # first mlp consumes 2*num_features rff outputs + the embedding channels.
         w0, _b0 = self.dense_weights_biases_for(self.mlp_names[0])
@@ -120,6 +93,9 @@ class RffNetwork(wiring.Component):
 
         wy, _by = self.dense_weights_biases_for("y_pred")
         self.out_d = int(wy.shape[1])
+
+        # extract mapping from layer id to relu bound o_O
+        self.relu_upper_bound = model_config["relu_upper_bound"]
 
         print(
             f">RffNetwork in_d={self.in_d} embed_dim={self.embed_dim}"
@@ -139,16 +115,14 @@ class RffNetwork(wiring.Component):
         w, b = self.qkeras_weights[name]["weights"]
         return np.asarray(w), np.asarray(b)
 
-    def relu_upper_bound_for(self, name: str):
-        """Per-layer relu upper bound from layer_info (None => no relu)."""
-        return self.qkeras_weights.get(name, {}).get("relu_upper_bound")
-
     def elaborate(self, platform):
         m = Module()
 
         # ---- feature layer -------------------------------------------------
         rff = RandomFourierFeaturesLUT.from_rff(
-            self.qkeras_weights["rff"], lut_size=self.lut_size
+            self.qkeras_weights["rff"]["B"],
+            quant_sizes=self.quant_sizes,
+            lut_size=self.lut_size,
         )
         m.submodules["rff"] = rff
         num_rff = 2 * self.num_features
@@ -157,12 +131,11 @@ class RffNetwork(wiring.Component):
         mlps = []
         for idx, name in enumerate(self.mlp_names):
             w, b = self.dense_weights_biases_for(name)
-            relu_ub = self.relu_upper_bound_for(name)
             mlp = QDenseLayer(
                 w,
                 b,
-                apply_relu=relu_ub is not None,
-                relu_upper_bound=relu_ub,
+                apply_relu=True,
+                relu_upper_bound=self.relu_upper_bound,
                 in_shape=self.io_shape if idx == 0 else NNQ,
                 out_shape=NNQ,
             )

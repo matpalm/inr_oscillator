@@ -35,7 +35,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from amaranth_v import NNQ
 from amaranth_v.dense_layer import QDenseLayer
-from amaranth_v.rff_network import RffNetwork, load_weights
+from amaranth_v.rff_network import RffNetwork, load_weights_and_config
 from qkeras_v.rff_lut import (
     build_io_luts,
     frac_bits,
@@ -44,7 +44,6 @@ from qkeras_v.rff_lut import (
     rff_lut_features,
 )
 from test_equivalences.test_dense_equivalence import golden as dense_golden
-
 
 def simulate(net, sample_codes):
     """Drive the Amaranth RffNetwork over ``sample_codes`` (N, IN_D) io codes."""
@@ -72,11 +71,11 @@ def simulate(net, sample_codes):
     return np.array(results, dtype=np.int64)
 
 
-def build_reference(net, phase_codes, embed_codes):
+def build_reference(net, phase_codes, embed_codes, quant_sizes):
     """Integer-exact numpy reference for the whole network (io input codes)."""
     rff = net.qkeras_weights["rff"]
-    io_bits, io_integer = int(rff["io_bits"]), int(rff["io_integer"])
-    b_bits, b_integer = int(rff["b_bits"]), int(rff["b_integer"])
+    io_bits, io_integer = quant_sizes["io_bits"], quant_sizes["io_int"]
+    b_bits, b_integer = quant_sizes["b_bits"], quant_sizes["b_int"]
 
     B = np.asarray(rff["B"]).reshape(-1)
     b_codes = np.round(B * (2.0 ** frac_bits(b_bits, b_integer))).astype(np.int64)
@@ -95,7 +94,7 @@ def build_reference(net, phase_codes, embed_codes):
     layer_specs.append(("y_pred", net.io_shape))
     for name, out_shape in layer_specs:
         w, b = net.dense_weights_biases_for(name)
-        relu_ub = net.relu_upper_bound_for(name)
+        relu_ub = None if name == "y_pred" else net.relu_upper_bound
         apply_relu = relu_ub is not None
         acc_shape, prod_shift = QDenseLayer.acc_shape_for(in_shape, w.shape[0], b)
         w_codes = np.round(w * (2.0**NNQ.f_bits)).astype(np.int64)
@@ -126,7 +125,6 @@ def _find_weights_pkl():
 
 
 class TestRffNetworkEquivalence(unittest.TestCase):
-    LUT_SIZE = 1024
     NUM_SAMPLES = 32
     SEED = 0
 
@@ -134,18 +132,18 @@ class TestRffNetworkEquivalence(unittest.TestCase):
         pkl = _find_weights_pkl()
         if pkl is None or not pkl.exists():
             self.skipTest("no qkeras weights pickle found (set RFF_WEIGHTS_PKL)")
-        self.weights = load_weights(pkl)
+        self.weights, self.quant_sizes, self.model_config = load_weights_and_config(pkl)
         if not {"rff", "y_pred"} <= set(self.weights):
             self.skipTest(f"{pkl} missing rff/y_pred entries; retrain")
+        self.lut_size = self.model_config["rff"]["lut_size"]
 
     def test_network_bit_exact(self):
-        net = RffNetwork(
-            self.weights,
-            lut_size=self.LUT_SIZE,
-        )
+
+        net = RffNetwork(self.weights, self.quant_sizes, self.model_config)
 
         rff = self.weights["rff"]
-        io_bits, io_integer = int(rff["io_bits"]), int(rff["io_integer"])
+
+        io_bits, io_integer = self.quant_sizes["io_bits"], self.quant_sizes["io_int"]
 
         rng = np.random.default_rng(self.SEED)
         phases = np.linspace(-1.0, 1.0, self.NUM_SAMPLES, endpoint=False)
@@ -159,7 +157,7 @@ class TestRffNetworkEquivalence(unittest.TestCase):
         )
         sample_codes = np.concatenate([phase_codes.reshape(-1, 1), embed_codes], axis=1)
 
-        ref = build_reference(net, phase_codes, embed_codes)
+        ref = build_reference(net, phase_codes, embed_codes, self.quant_sizes)
         hw = simulate(net, sample_codes)
 
         self.assertEqual(ref.shape, hw.shape)

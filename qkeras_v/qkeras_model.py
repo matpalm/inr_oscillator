@@ -16,6 +16,7 @@ from qkeras import quantized_bits, QDense, QActivation
 class QRandomFourierFeatures(Layer):
     """
     Fixed Random Fourier Feature mapping (Tancik et al. 2020), quantised.
+    https://arxiv.org/abs/2006.10739
 
     Maps input v -> [cos(2*pi*v*Bq), sin(2*pi*v*Bq)] where B is a fixed
     (non-trainable) Gaussian matrix sampled once from N(0, scale**2) and Bq is
@@ -70,11 +71,38 @@ class QRandomFourierFeatures(Layer):
         return config
 
 
+# def b_io_quant_sizes(model_config):
+#     return QKerasRFFModelBuilder(**model_config)._get_b_io_quant_sizes()
+
+
 class QKerasRFFModelBuilder(object):
 
-    def __init__(self):
-        self.layer_info = []
-        self.built = False
+    def __init__(
+        self,
+        fp_info: dict,
+        in_d: int,
+        rff: dict,
+        mlp_layers: int,
+        mlp_dim: int,
+        out_d: int,
+        relu_upper_bound: float,
+    ):
+        # phase -> quantised Random Fourier Features -> concat quantised 2D
+        # waveform embedding -> quantised ReLU MLP -> quantised output.
+        self.in_d = in_d
+        self.rff_num_features = rff["num_features"]
+        self.rff_scale = rff["scale"]
+        self.rff_seed = rff["seed"]
+        self.mlp_layers = mlp_layers
+        self.mlp_dim = mlp_dim
+        self.out_d = out_d
+        self.relu_upper_bound = relu_upper_bound
+        self.mlp_n_int = fp_info["mlp"]["n_int"]
+        self.mlp_n_frac = fp_info["mlp"]["n_frac"]
+        self.mlp_n_word = self.mlp_n_int + self.mlp_n_frac
+        self.io_n_int = fp_info["io"]["n_frac"]
+        self.io_n_frac = fp_info["io"]["n_frac"]
+        self.io_n_word = self.io_n_int + self.io_n_frac
 
     # quantiser for kernels / biases
     def quantiser(self, double_width: bool = False):
@@ -93,124 +121,78 @@ class QKerasRFFModelBuilder(object):
     # quantiser for the (fixed) RFF frequency matrix B. B ~ N(0, scale**2) so
     # |B| routinely exceeds the weight integer range; size the integer part to
     # cover ~4 sigma so we do not clip the sampled frequencies.
-    def b_quantiser(self, scale: float):
-        n_int_b = max(self.mlp_n_int, int(math.ceil(math.log2(max(4.0 * scale, 1.0)))))
-        self.layer_info.append({"type": "rff_b_quant", "n_int": n_int_b})
+    def b_quantiser(self):
+        n_int_b = max(
+            self.mlp_n_int, int(math.ceil(math.log2(max(4.0 * self.rff_scale, 1.0))))
+        )
         return quantized_bits(bits=n_int_b + self.mlp_n_frac, integer=n_int_b, alpha=1)
 
     # relu activation quantiser (string form consumed by QActivation)
-    def quant_relu(self, upper_bound: float):
-        return f"quantized_relu({self.mlp_n_word},{self.mlp_n_int},relu_upper_bound={upper_bound})"
+    def quant_relu(self):
+        return f"quantized_relu({self.mlp_n_word},{self.mlp_n_int},relu_upper_bound={self.relu_upper_bound})"
 
-    def create_rff_inr_model(
-        self,
-        fp_info: dict,
-        in_d: int,
-        num_fourier_features: int,
-        rff_scale: float,
-        mlp_layers: int,
-        mlp_dim: int,
-        out_d: int,
-        relu_upper_bound: float,
-        rff_seed: int = 0,
-    ):
-        # phase -> quantised Random Fourier Features -> concat quantised 2D
-        # waveform embedding -> quantised ReLU MLP -> quantised output.
+    def get_b_io_quant_sizes(self):
+        rff_b_quant = self.b_quantiser()
+        rff_io_quant = self.io_quantiser()
+        return {
+            "b_bits": rff_b_quant.bits,
+            "b_int": rff_b_quant.integer,
+            "io_bits": rff_io_quant.bits,
+            "io_int": rff_io_quant.integer,
+        }
 
-        self.mlp_n_int = fp_info["mlp"]["n_int"]
-        self.mlp_n_frac = fp_info["mlp"]["n_frac"]
-        self.mlp_n_word = self.mlp_n_int + self.mlp_n_frac
-        self.io_n_int = fp_info["io"]["n_frac"]
-        self.io_n_frac = fp_info["io"]["n_frac"]
-        self.io_n_word = self.io_n_int + self.io_n_frac
+    def build(self):
 
-        self.layer_info = []
-
-        inp = Input((None, in_d))
+        inp = Input((None, self.in_d))
 
         # phase angle in [-1, 1); at inference run as: phase += delta; wrap 1 to -1
         phase = Lambda(lambda t: t[..., 0:1], name="phase")(inp)
-        embed = Lambda(lambda t: t[..., 1:in_d], name="embed")(inp)
+        embed = Lambda(lambda t: t[..., 1 : self.in_d], name="embed")(inp)
 
         # quantise the raw inputs (signal-path format)
         phase_q = QActivation(self.io_quantiser(), name="phase_q")(phase)
         embed_q = QActivation(self.io_quantiser(), name="embed_q")(embed)
 
-        rff_b_quant = self.b_quantiser(rff_scale)
+        rff_b_quant = self.b_quantiser()
         rff_io_quant = self.io_quantiser()
         rff = QRandomFourierFeatures(
-            num_features=num_fourier_features,
-            scale=rff_scale,
+            num_features=self.rff_num_features,
+            scale=self.rff_scale,
             b_quantizer=rff_b_quant,
             out_quantizer=rff_io_quant,
-            seed=rff_seed,
+            seed=self.rff_seed,
             name="rff",
         )(phase_q)
-        self.layer_info.append(
-            {
-                "type": "rff",
-                "num_features": num_fourier_features,
-                "b_bits": int(rff_b_quant.bits),
-                "b_integer": int(rff_b_quant.integer),
-                "io_bits": int(rff_io_quant.bits),
-                "io_integer": int(rff_io_quant.integer),
-            }
-        )
 
         h = Concatenate(name="rff_embed")([rff, embed_q])
-        for i in range(mlp_layers):
+        for i in range(self.mlp_layers):
             h = QDense(
-                mlp_dim,
+                self.mlp_dim,
                 kernel_quantizer=self.quantiser(),
                 bias_quantizer=self.quantiser(double_width=True),
                 name=f"mlp{i}",
             )(h)
-            self.layer_info.append(
-                {
-                    "type": "qdense",
-                    "id": f"mlp{i}",
-                    "mlp_dim": mlp_dim,
-                    "n_int": self.mlp_n_int,
-                    "n_frac": self.mlp_n_frac,
-                    "relu_upper_bound": relu_upper_bound,
-                }
-            )
-            h = QActivation(self.quant_relu(relu_upper_bound), name=f"qrelu{i}")(h)
+            h = QActivation(self.quant_relu(), name=f"qrelu{i}")(h)
 
         y_pred = QDense(
-            out_d,
+            self.out_d,
             kernel_quantizer=self.quantiser(),
             bias_quantizer=self.quantiser(double_width=True),
             name="y_pred",
         )(h)
-        self.layer_info.append(
-            {
-                "type": "qdense",
-                "id": "y_pred",
-                "mlp_dim": out_d,
-                "n_int": self.mlp_n_int,
-                "n_frac": self.mlp_n_frac,
-            }
-        )
 
         # TODO: should we keep this as self.quantiser as cdcc did?
         y_pred = QActivation(self.io_quantiser(), name="qout")(y_pred)
-        self.layer_info.append(
-            {"type": "qout", "n_int": self.io_n_int, "n_frac": self.io_n_frac}
-        )
 
-        print("layer_info", self.layer_info)
-        self.built = True
         return Model(inp, y_pred)
 
 
-def create_rff_inr_model_from_config_and_latest_ckpt(run: str):
+def build_model_from_config_and_latest_ckpt(run: str):
     run_dir_path = Path("runs") / run
-    builder = QKerasRFFModelBuilder()
     with open(run_dir_path / "model_config.json", "r") as f:
         model_config = json.load(f)
     print("model_config", model_config)
-    model = builder.create_rff_inr_model(**model_config)
+    model = QKerasRFFModelBuilder(**model_config).build()
     ckpts = (run_dir_path / "weights" / "keras").iterdir()
     latest_ckpt = list(sorted(ckpts))[-1]
     print("using ckpt", latest_ckpt)

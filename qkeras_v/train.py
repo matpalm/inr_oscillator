@@ -74,32 +74,40 @@ def train(opts):
         emit_interpolated_samples=True,
     )
 
+    # TODO: rff_lut_size can be pushed all the way to the RFF generation
+
     # make model
-    builder = QKerasRFFModelBuilder()
     model_config = {
+        "in_d": in_d,
         "fp_info": {
             "mlp": {"n_int": opts.mlp_fp_int, "n_frac": opts.mlp_fp_frac},
             "io": {"n_int": opts.io_fp_int, "n_frac": opts.io_fp_frac},
         },
-        "in_d": in_d,
-        "num_fourier_features": opts.num_fourier_features,
-        "rff_scale": opts.rff_scale,
+        "rff": {
+            "num_features": opts.num_fourier_features,
+            "scale": opts.rff_scale,
+            "lut_size": opts.rff_lut_size,
+            "seed": opts.rff_seed,
+        },
         "mlp_layers": opts.mlp_layers,
         "mlp_dim": opts.mlp_dim,
         "out_d": out_d,
         "relu_upper_bound": opts.relu_upper_bound,
-        "rff_seed": opts.rff_seed,
     }
     print("model_config", model_config)
     with open(run_path / "model_config.json", "w") as f:
         json.dump(model_config, f)
-    train_model = builder.create_rff_inr_model(**model_config)
+
+    builder = QKerasRFFModelBuilder(**model_config)
+
+    with open(run_path / "quant_sizes.json", "w") as f:
+        json.dump(builder.get_b_io_quant_sizes(), f)
+
+    train_model = builder.build()
 
     train_model.summary()
     with open(run_path / "qkeras_model.summary.txt", "w") as f:
         train_model.summary(print_fn=lambda line: f.write(line + "\n"))
-    with open(run_path / "qkeras_model.layer_info.json", "w") as f:
-        json.dump(builder.layer_info, f)
 
     # optionally initialise from prior (float keras_v or qkeras_v) weights for fine-tuning
     init_weights_path = None
@@ -111,19 +119,6 @@ def train(opts):
         print("init weights from", init_weights_path)
         train_model.load_weights(init_weights_path)
 
-    # not useful anymore? ( with everything baked into layer_info.json )
-    # with open(run_path / "qkeras_model.fp_config.json", "w") as f:
-    #     json.dump(
-    #         {
-    #             "n_int": builder.mlp_n_int,
-    #             "n_frac": builder.mlp_n_frac,
-    #             "io_n_int": builder.io_n_int,
-    #             "io_n_frac": builder.io_n_frac,
-    #             "init_weights_path": init_weights_path,
-    #         },
-    #         f,
-    #     )
-
     ramp_callback, beta_stft = setup_beta_stft_var_and_update_callback(
         opts.epochs, opts.beta_stft_warmup, opts.beta_stft_ramp, opts.beta_stft
     )
@@ -131,7 +126,6 @@ def train(opts):
     class SaveQuantisedWeights(tf.keras.callbacks.Callback):
         def on_epoch_end(self, epoch, logs=None):
             quantised_weights = model_save_quantized_weights(train_model)
-
             rff = train_model.get_layer("rff")
             quantised_weights["rff"] = {
                 "B": rff.b_quantizer(rff.B).numpy(),
@@ -146,6 +140,8 @@ def train(opts):
             except FileNotFoundError:
                 pass
             latest_symlink.symlink_to(pkl_fname.name)
+
+    # TODO: bring across cosine schedule from CDCC
 
     callbacks = []
     # log beta_stft (and lr) into the logs before the TensorBoard callback
@@ -258,8 +254,14 @@ def build_parser():
     parser.add_argument(
         "--rff-scale",
         type=float,
-        default=5.0,
+        default=1.0,
         help="Gaussian std (sigma) for the fixed RFF frequency matrix B",
+    )
+    parser.add_argument(
+        "--rff-lut-size",
+        type=int,
+        default=1024,
+        help="target lut size for amaranth_v",
     )
     parser.add_argument("--rff-seed", type=int, default=0)
     parser.add_argument("--mlp-layers", type=int, default=2)

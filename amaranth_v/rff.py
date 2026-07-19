@@ -24,6 +24,8 @@ from amaranth import Module, Signal, signed, Array, Const
 from amaranth.lib import wiring, stream, data
 from amaranth.lib.wiring import In, Out
 
+import numpy as np
+from qkeras_v.rff_lut import build_io_luts, frac_bits, plan_shift
 
 class RandomFourierFeaturesLUT(wiring.Component):
 
@@ -58,23 +60,19 @@ class RandomFourierFeaturesLUT(wiring.Component):
         )
 
     @classmethod
-    def from_rff(cls, rff, lut_size=1024):
+    def from_rff(cls, B, quant_sizes, lut_size):
         """Build the component from a pickled ``rff`` entry (see ``qkeras_v.train``).
-
-        ``rff`` is the dict stored under ``weights["rff"]`` in the qkeras pickle:
         ``{"B", "b_bits", "b_integer", "io_bits", "io_integer"}``.  The B codes and
         cos/sin LUT are derived with ``qkeras_v.rff_lut`` (the same helpers the
         numpy golden model uses), so the resulting hardware stays bit-exact.
         """
-        import numpy as np
-        from qkeras_v.rff_lut import build_io_luts, frac_bits, plan_shift
 
-        b_bits, b_integer = int(rff["b_bits"]), int(rff["b_integer"])
-        io_bits, io_integer = int(rff["io_bits"]), int(rff["io_integer"])
+        b_bits, b_integer = quant_sizes["b_bits"], quant_sizes["b_int"]
+        io_bits, io_integer = quant_sizes["io_bits"], quant_sizes["io_int"]
 
         # RFF input is the scalar phase (in_dim == 1); B is (in_dim, num_features).
         b_f = frac_bits(b_bits, b_integer)
-        B = np.asarray(rff["B"]).reshape(-1)
+        B = np.asarray(B).reshape(-1)
         b_codes = np.round(B * (2.0**b_f)).astype(np.int64).tolist()
 
         shift, _ = plan_shift(io_bits, io_integer, b_bits, b_integer, lut_size)
