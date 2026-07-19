@@ -100,7 +100,7 @@ class QKerasRFFModelBuilder(object):
         self.mlp_n_int = fp_info["mlp"]["n_int"]
         self.mlp_n_frac = fp_info["mlp"]["n_frac"]
         self.mlp_n_word = self.mlp_n_int + self.mlp_n_frac
-        self.io_n_int = fp_info["io"]["n_frac"]
+        self.io_n_int = fp_info["io"]["n_int"]
         self.io_n_frac = fp_info["io"]["n_frac"]
         self.io_n_word = self.io_n_int + self.io_n_frac
 
