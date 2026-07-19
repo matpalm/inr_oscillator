@@ -182,9 +182,38 @@ def train(opts):
         stft_win_lengths=halving_triple(opts.base_stft_win_length),
         stft_hop_sizes=stft_hop_sizes,
     )
-    optimizer = AdamW(opts.learning_rate, weight_decay=opts.weight_decay)
+    if opts.cosine_schedule:
+        lr_warmup_epochs = opts.beta_stft_warmup + opts.beta_stft_ramp
+        steps_per_epoch = max(1, opts.num_train_samples // opts.batch_size)
+        total_steps = opts.epochs * steps_per_epoch
+        warmup_steps = lr_warmup_epochs * steps_per_epoch
+        if warmup_steps > 0:
+            lr_schedule = tf.keras.optimizers.schedules.CosineDecay(
+                initial_learning_rate=0.0,
+                decay_steps=max(1, total_steps - warmup_steps),
+                alpha=opts.lr_min_frac,
+                warmup_target=opts.learning_rate,
+                warmup_steps=warmup_steps,
+            )
+        else:
+            lr_schedule = tf.keras.optimizers.schedules.CosineDecay(
+                initial_learning_rate=opts.learning_rate,
+                decay_steps=max(1, total_steps),
+                alpha=opts.lr_min_frac,
+            )
+        print(
+            "lr schedule: cosine decay"
+            f" lr={opts.learning_rate} warmup_epochs={lr_warmup_epochs}"
+            f" total_steps={total_steps} steps_per_epoch={steps_per_epoch}"
+            f" min_frac={opts.lr_min_frac}"
+        )
+    else:
+        lr_schedule = opts.learning_rate
+        print(f"lr schedule: fixed lr={opts.learning_rate}")
+
+    optimiser = AdamW(learning_rate=lr_schedule, weight_decay=opts.weight_decay)
     train_model.compile(
-        optimizer,
+        optimiser,
         loss=combined_loss_fn,
         metrics=[mse_metric, huber_metric, stft_metric],
         jit_compile=False,  # XLA problem with STFT ???
@@ -200,6 +229,17 @@ def build_parser():
     parser.add_argument("--run", type=Path, required=True)
     parser.add_argument("--learning-rate", type=float, default=1e-3)
     parser.add_argument("--weight-decay", type=float, default=1e-3)
+    parser.add_argument(
+        "--cosine-schedule",
+        action="store_true",
+        help="if set, use linear warmup + cosine decay; otherwise use a fixed learning rate",
+    )
+    parser.add_argument(
+        "--lr-min-frac",
+        type=float,
+        default=0.01,
+        help="cosine decay floor as a fraction of --learning-rate (0 => decay to 0)",
+    )
     parser.add_argument("--epochs", type=int, default=10)
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--min-note", type=str, default="A3")
