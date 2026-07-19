@@ -197,6 +197,8 @@ class QDenseLayer(wiring.Component):
             signed(self.acc_shape.width), name="qdense_post_reclipped"
         )
 
+        w_addr = Signal(range(self.num_weights + 1), name="qdense_w_addr")
+
         m.d.comb += [
             self.i.ready.eq(0),
             self.o.valid.eq(0),
@@ -223,6 +225,7 @@ class QDenseLayer(wiring.Component):
                     m.d.sync += [
                         self.i_idx.eq(0),
                         self.o_idx.eq(0),
+                        w_addr.eq(0),
                     ]
                     m.next = "PREFETCH_BIAS"
 
@@ -237,11 +240,12 @@ class QDenseLayer(wiring.Component):
             with m.State("LOAD_BIAS"):
                 # seed accumulator with the ( double-width ) bias
                 m.d.sync += self.accumulator.eq(rd_b.data.as_value().as_signed())
-                # prep read of first weight for this column
+                # prep read of first weight for this column ( sequential addr )
                 m.d.comb += [
                     rd_w.en.eq(1),
-                    rd_w.addr.eq(self.o_idx * self.in_d + self.i_idx),
+                    rd_w.addr.eq(w_addr),
                 ]
+                m.d.sync += w_addr.eq(w_addr + 1)
                 m.next = "LOAD_MUL_INPUTS"
 
             with m.State("LOAD_MUL_INPUTS"):
@@ -264,8 +268,9 @@ class QDenseLayer(wiring.Component):
                     m.d.sync += self.i_idx.eq(self.i_idx + 1)
                     m.d.comb += [
                         rd_w.en.eq(1),
-                        rd_w.addr.eq(self.o_idx * self.in_d + self.i_idx + 1),
+                        rd_w.addr.eq(w_addr),
                     ]
+                    m.d.sync += w_addr.eq(w_addr + 1)
                     m.next = "LOAD_MUL_INPUTS"
 
             with m.State("CLAMP"):
