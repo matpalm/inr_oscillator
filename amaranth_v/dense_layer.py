@@ -192,6 +192,11 @@ class QDenseLayer(wiring.Component):
         mul_a = Signal(signed(self.in_shape.width), name="qdense_mul_a")
         mul_b = Signal(signed(NNQ.width), name="qdense_mul_b")
 
+        post_clamped = Signal(signed(self.acc_shape.width), name="qdense_post_clamped")
+        post_reclipped = Signal(
+            signed(self.acc_shape.width), name="qdense_post_reclipped"
+        )
+
         m.d.comb += [
             self.i.ready.eq(0),
             self.o.valid.eq(0),
@@ -254,7 +259,7 @@ class QDenseLayer(wiring.Component):
                     + ((mul_a * mul_b) << self.prod_shift)
                 )
                 with m.If(self.i_idx == self.in_d - 1):
-                    m.next = "POST_PROCESS"
+                    m.next = "CLAMP"
                 with m.Else():
                     m.d.sync += self.i_idx.eq(self.i_idx + 1)
                     m.d.comb += [
@@ -263,19 +268,18 @@ class QDenseLayer(wiring.Component):
                     ]
                     m.next = "LOAD_MUL_INPUTS"
 
-            with m.State("POST_PROCESS"):
-                # clamp -> optional relu -> re-clip -> truncate toward zero while
-                # narrowing NNQ_DW -> out_shape. matches cdcc/conv1d POST_PROCESS.
+            with m.State("CLAMP"):
+                # clamp accumulator to [lower, upper].
                 acc = self.accumulator.as_value()
-
-                # clamp to [lower, upper]
-                clipped = Mux(
-                    acc < lower,
-                    lower,
-                    Mux(acc > upper, upper, acc),
+                m.d.sync += post_clamped.eq(
+                    Mux(acc < lower, lower, Mux(acc > upper, upper, acc))
                 )
+                m.next = "RELU"
 
-                # optional relu: negatives -> 0, cap at relu_upper_bound
+            with m.State("RELU"):
+                # optional relu, then re-clip to
+                # [lower, upper] ( matches fxpmath/qkeras ).
+                clipped = post_clamped
                 if self.apply_relu:
                     relu_ub = self.relu_upper_bound.as_value()
                     post = Mux(
@@ -285,14 +289,14 @@ class QDenseLayer(wiring.Component):
                     )
                 else:
                     post = clipped
-
-                # re-clip ( matches fxpmath/qkeras ) then truncate toward zero
-                # while narrowing NNQ_DW -> out_shape.
-                acc_clipped = Mux(
-                    post < lower,
-                    lower,
-                    Mux(post > upper, upper, post),
+                m.d.sync += post_reclipped.eq(
+                    Mux(post < lower, lower, Mux(post > upper, upper, post))
                 )
+                m.next = "TRUNCATE"
+
+            with m.State("TRUNCATE"):
+                # truncate toward zero while narrowing NNQ_DW -> out_shape.
+                acc_clipped = post_reclipped
                 frac_nonzero = acc_clipped[:frac_drop].any()
                 trunc_toward_zero = Mux(
                     acc_clipped[-1] & frac_nonzero,
