@@ -22,6 +22,7 @@ This is a verification-oriented implementation, not an area-optimised one.
 
 from amaranth import Module, Signal, signed, Array, Const
 from amaranth.lib import wiring, stream, data
+from amaranth.lib.memory import Memory
 from amaranth.lib.wiring import In, Out
 
 import numpy as np
@@ -47,6 +48,15 @@ class RandomFourierFeaturesLUT(wiring.Component):
             self._shift >= 0
         ), "shift must be non-negative (io_frac + b_frac >= log2(lut_size))"
         self._lut_bits = (self._lut_size - 1).bit_length()
+
+        # cos(x) == sin(x + pi/2): so can use same ROM for both
+        _q = self._lut_size // 4
+        _mask = self._lut_size - 1
+        for _i in range(self._lut_size):
+            assert self._cos_lut[_i] == self._sin_lut[(_i + _q) & _mask], (
+                f"cos/sin quarter-turn identity failed at index {_i}; "
+                "cannot share a single ROM"
+            )
 
         super().__init__(
             {
@@ -97,13 +107,27 @@ class RandomFourierFeaturesLUT(wiring.Component):
 
         K = self._num_features
         io_bits = self._io_bits
+        lut_size = self._lut_size
+        q = lut_size // 4  # quarter turn: cos(x) = sin(x + pi/2)
+        mask = lut_size - 1
 
         b_rom = Array(Const(c, signed(self._b_bits)) for c in self._b_codes)
-        cos_rom = Array(Const(c, signed(io_bits)) for c in self._cos_lut)
-        sin_rom = Array(Const(c, signed(io_bits)) for c in self._sin_lut)
+
+        # shared memory for both sin ane cos
+        # cos = trig[(idx + lut_size/4) & mask].
+        trig_mem = Memory(
+            shape=signed(io_bits),
+            depth=lut_size,
+            init=self._sin_lut,
+            attrs={"ram_style": "block"},
+        )
+        m.submodules["trig_mem"] = trig_mem
+        rd_sin = trig_mem.read_port(domain="sync")
+        rd_cos = trig_mem.read_port(domain="sync")
 
         phase = Signal(signed(io_bits))
         k = Signal(range(K + 1))
+        prod = Signal(signed(io_bits + self._b_bits))
         cos_arr = Array(Signal(signed(io_bits), name=f"cos_{j}") for j in range(K))
         sin_arr = Array(Signal(signed(io_bits), name=f"sin_{j}") for j in range(K))
 
@@ -111,11 +135,16 @@ class RandomFourierFeaturesLUT(wiring.Component):
             m.d.comb += self.o.payload[j].eq(cos_arr[j])
             m.d.comb += self.o.payload[K + j].eq(sin_arr[j])
 
-        # fixed-point product and fractional-turn LUT index for the current feature
-        prod = Signal(signed(io_bits + self._b_bits))
-        m.d.comb += prod.eq(phase * b_rom[k])
-        idx = Signal(range(self._lut_size))
+        # fractional-turn LUT index for the (registered) product of this feature
+        idx = Signal(range(lut_size))
         m.d.comb += idx.eq((prod >> self._shift)[: self._lut_bits])
+
+        m.d.comb += [
+            rd_sin.en.eq(0),
+            rd_sin.addr.eq(0),
+            rd_cos.en.eq(0),
+            rd_cos.addr.eq(0),
+        ]
 
         with m.FSM():
             with m.State("IDLE"):
@@ -123,15 +152,34 @@ class RandomFourierFeaturesLUT(wiring.Component):
                 with m.If(self.i.valid):
                     m.d.sync += phase.eq(self.i.payload)
                     m.d.sync += k.eq(0)
-                    m.next = "COMPUTE"
+                    m.next = "MUL"
 
-            with m.State("COMPUTE"):
+            with m.State("MUL"):
                 with m.If(k == K):
                     m.next = "DONE"
                 with m.Else():
-                    m.d.sync += cos_arr[k].eq(cos_rom[idx])
-                    m.d.sync += sin_arr[k].eq(sin_rom[idx])
-                    m.d.sync += k.eq(k + 1)
+                    # register phase * B_k so the multiply is off the
+                    # ROM-address path.
+                    m.d.sync += prod.eq(phase * b_rom[k])
+                    m.next = "ADDR"
+
+            with m.State("ADDR"):
+                # drive both read ports -- sin at idx, cos a quarter
+                # turn ahead. data is valid next cycle (synchronous EBR read).
+                m.d.comb += [
+                    rd_sin.en.eq(1),
+                    rd_sin.addr.eq(idx),
+                    rd_cos.en.eq(1),
+                    rd_cos.addr.eq((idx + q) & mask),
+                ]
+                m.next = "READ"
+
+            with m.State("READ"):
+                # read sin and cos
+                m.d.sync += sin_arr[k].eq(rd_sin.data)
+                m.d.sync += cos_arr[k].eq(rd_cos.data)
+                m.d.sync += k.eq(k + 1)
+                m.next = "MUL"
 
             with m.State("DONE"):
                 m.d.comb += self.o.valid.eq(1)
