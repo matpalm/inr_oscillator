@@ -82,8 +82,7 @@ class QKerasRFFModelBuilder(object):
         fp_info: dict,
         in_d: int,
         rff: dict,
-        mlp_layers: int,
-        mlp_dim: int,
+        mlp_dims: list[int],
         out_d: int,
         relu_upper_bound: float,
     ):
@@ -93,8 +92,7 @@ class QKerasRFFModelBuilder(object):
         self.rff_num_features = rff["num_features"]
         self.rff_scale = rff["scale"]
         self.rff_seed = rff["seed"]
-        self.mlp_layers = mlp_layers
-        self.mlp_dim = mlp_dim
+        self.mlp_dims = mlp_dims
         self.out_d = out_d
         self.relu_upper_bound = relu_upper_bound
         self.mlp_n_int = fp_info["mlp"]["n_int"]
@@ -165,9 +163,9 @@ class QKerasRFFModelBuilder(object):
         )(phase_q)
 
         h = Concatenate(name="rff_embed")([rff, embed_q])
-        for i in range(self.mlp_layers):
+        for i, dim in enumerate(self.mlp_dims):
             h = QDense(
-                self.mlp_dim,
+                dim,
                 kernel_quantizer=self.quantiser(),
                 bias_quantizer=self.quantiser(double_width=True),
                 name=f"mlp{i}",

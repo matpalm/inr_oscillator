@@ -8,7 +8,7 @@ time uv run -m qkeras_v.train \
  --num-fourier-features 80 --rff-scale 0.25 --rff-lut-size 4096 \
  --io-fp-int 1 --io-fp-frac 15 \
  --mlp-fp-int 3 --mlp-fp-frac 13 --relu-upper-bound 8 \
- --mlp-layers 3 --mlp-dim 24 \
+ --mlp-dims 24 24 24 \
  --alpha-mse 0.0 --alpha-huber 1.0 \
  --beta-stft-warmup 0 --beta-stft-ramp 0 --beta-stft 0.001 \
  --base-stft-fft-size 2048 --base-stft-win-length 256 \

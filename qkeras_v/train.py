@@ -89,8 +89,7 @@ def train(opts):
             "lut_size": opts.rff_lut_size,
             "seed": opts.rff_seed,
         },
-        "mlp_layers": opts.mlp_layers,
-        "mlp_dim": opts.mlp_dim,
+        "mlp_dims": opts.mlp_dims,
         "out_d": out_d,
         "relu_upper_bound": opts.relu_upper_bound,
     }
@@ -304,8 +303,13 @@ def build_parser():
         help="target lut size for amaranth_v",
     )
     parser.add_argument("--rff-seed", type=int, default=0)
-    parser.add_argument("--mlp-layers", type=int, default=2)
-    parser.add_argument("--mlp-dim", type=int, default=16)
+    parser.add_argument(
+        "--mlp-dims",
+        type=int,
+        nargs="+",
+        default=[16, 16],
+        help="per-layer node counts, e.g. --mlp-dims 8 32 32 => 3 layers",
+    )
     parser.add_argument(
         "--alpha-mse",
         type=float,
