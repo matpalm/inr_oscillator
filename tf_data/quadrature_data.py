@@ -54,6 +54,13 @@ def sample_freq(min_freq, max_freq, alpha):
 
 class Embed2DQuadratureData(object):
 
+    @classmethod
+    def add_args(cls, parser):
+        parser.add_argument("--min-note", type=str, default="A3")
+        parser.add_argument("--max-note", type=str, default="A5")
+        parser.add_argument("--harsh", action="store_true")
+        parser.add_argument("--sample-rate-khz", type=float, default=192)
+
     def __init__(
         self,
         min_note: str,
@@ -78,6 +85,12 @@ class Embed2DQuadratureData(object):
             bits=fp_int + fp_frac, integer=fp_int, alpha=1
         )
         self.quantise_y = quantise_y
+
+    def in_d(self):
+        return 3
+
+    def out_d(self):
+        return 1
 
     def calculate_wave(
         self,
@@ -156,10 +169,6 @@ class Embed2DQuadratureData(object):
         else:
             result = np.clip(result, -1, 1)
 
-        # scale and quantise for output
-        phase_sin *= scale
-        phase_cos *= scale
-
         wave = scale * result
         if self.quantise_y:
             wave = self.y_quantiser(wave)
@@ -168,10 +177,8 @@ class Embed2DQuadratureData(object):
         phase_wrapped = np.mod(phase / np.pi + 1.0, 2.0) - 1.0
 
         return {
-            "phase": phase_wrapped,
-            "phase_sin": phase_sin,
-            "phase_cos": phase_cos,
-            "wave": wave,
+            "phase": phase_wrapped,  # (-1, 1)
+            "wave": wave,  # (-0.8, 0.8)
             "interp": interp,
         }
 

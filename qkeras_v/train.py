@@ -17,12 +17,13 @@ from tensorflow.keras.optimizers import AdamW
 from qkeras.utils import model_save_quantized_weights
 
 from .qkeras_model import QKerasRFFModelBuilder
-from common.util import CheckYPred
 from tf_data.quadrature_data import Embed2DQuadratureData
+from tf_data.pcapture_static_data import ParametricCaptureStaticData
 from common.losses import combined_loss_terms
 from common.callbacks import (
     setup_beta_stft_var_and_update_callback,
     LogLrAndBetaStft,
+    CheckYPred,
 )
 
 warnings.filterwarnings(
@@ -31,6 +32,7 @@ warnings.filterwarnings(
 
 
 def train(opts):
+    print("opts", opts)
 
     run_path = Path("runs") / opts.run
 
@@ -45,40 +47,61 @@ def train(opts):
     with open(run_path / "opts.json", "w") as f:
         json.dump(vars(opts), f, default=str)
 
-    in_d = 3  # phase, embed0, embed1
-    out_d = 1  # output wave
-    TRAIN_SEQ_LEN = 4 * opts.base_stft_win_length
+    TRAIN_SEQ_LEN = 10 * opts.base_stft_win_length
     TEST_SEQ_LEN = 2048
     print("TRAIN_SEQ_LEN", TRAIN_SEQ_LEN)
     print("TEST_SEQ_LEN", TEST_SEQ_LEN)
 
-    data = Embed2DQuadratureData(
-        min_note=opts.min_note,
-        max_note=opts.max_note,
-        sample_rate_khz=opts.sample_rate_khz,
-        harsh=opts.harsh,
-        seed=opts.seed,
-    )
-    train_ds = data.tf_dataset(
-        batch_size=opts.batch_size,
-        seq_len=TRAIN_SEQ_LEN,
-        num_samples=opts.num_train_samples,
-        emit_endpt_samples=True,
-        emit_interpolated_samples=True,
-    )
-    validate_ds = data.tf_dataset(
-        batch_size=opts.batch_size,
-        seq_len=TEST_SEQ_LEN,
-        num_samples=opts.num_validate_samples,
-        emit_endpt_samples=True,
-        emit_interpolated_samples=True,
-    )
+    if opts.dataset_type == "embed2d":
+        data = Embed2DQuadratureData(
+            min_note=opts.min_note,
+            max_note=opts.max_note,
+            sample_rate_khz=opts.sample_rate_khz,
+            harsh=opts.harsh,
+            seed=opts.seed,
+        )
+        train_ds = data.tf_dataset(
+            batch_size=opts.batch_size,
+            seq_len=TRAIN_SEQ_LEN,
+            num_samples=opts.num_train_samples,
+            emit_endpt_samples=True,
+            emit_interpolated_samples=True,
+        )
+        validate_ds = data.tf_dataset(
+            batch_size=opts.batch_size,
+            seq_len=TEST_SEQ_LEN,
+            num_samples=opts.num_validate_samples,
+            emit_endpt_samples=True,
+            emit_interpolated_samples=True,
+        )
+    elif opts.dataset_type == "pcapture":
+        data = ParametricCaptureStaticData(
+            capture_run=opts.capture_run,
+            keras_model=opts.keras_model,
+            seed=123,
+        )
+        train_ds = data.tf_training_dataset(
+            seq_len=TRAIN_SEQ_LEN,
+            num_batches=opts.num_train_samples // opts.batch_size,
+            batch_size=opts.batch_size,
+            emit_weights=True,
+            rnd_flip_a_b=True,
+        )
+        validate_ds = data.tf_training_dataset(
+            seq_len=TEST_SEQ_LEN,
+            num_batches=opts.num_train_samples // opts.batch_size,
+            batch_size=opts.batch_size,
+            emit_weights=False,
+            rnd_flip_a_b=False,
+        )
+    else:
+        raise Exception("unknown --dataset-type")
 
     # TODO: rff_lut_size can be pushed all the way to the RFF generation
 
     # make model
     model_config = {
-        "in_d": in_d,
+        "in_d": data.in_d(),
         "fp_info": {
             "mlp": {"n_int": opts.mlp_fp_int, "n_frac": opts.mlp_fp_frac},
             "io": {"n_int": opts.io_fp_int, "n_frac": opts.io_fp_frac},
@@ -90,7 +113,7 @@ def train(opts):
             "seed": opts.rff_seed,
         },
         "mlp_dims": opts.mlp_dims,
-        "out_d": out_d,
+        "out_d": data.out_d(),
         "relu_upper_bound": opts.relu_upper_bound,
     }
     print("model_config", model_config)
@@ -176,6 +199,7 @@ def train(opts):
         alpha_mse=opts.alpha_mse,
         alpha_huber=opts.alpha_huber,
         beta_stft=beta_stft,
+        reduce_mean=False,
         seq_len=TRAIN_SEQ_LEN,
         stft_fft_sizes=halving_triple(opts.base_stft_fft_size),
         stft_win_lengths=halving_triple(opts.base_stft_win_length),
@@ -218,7 +242,7 @@ def train(opts):
         jit_compile=False,  # XLA problem with STFT ???
     )
 
-    train_model.fit(train_ds, callbacks=callbacks, epochs=opts.epochs, verbose=2)
+    train_model.fit(train_ds, callbacks=callbacks, epochs=opts.epochs)  # , verbose=2)
 
 
 def build_parser():
@@ -240,12 +264,13 @@ def build_parser():
         help="cosine decay floor as a fraction of --learning-rate (0 => decay to 0)",
     )
     parser.add_argument("--epochs", type=int, default=10)
-    parser.add_argument("--batch-size", type=int, default=32)
-    parser.add_argument("--min-note", type=str, default="A3")
-    parser.add_argument("--max-note", type=str, default="A5")
-    parser.add_argument("--harsh", action="store_true")
-    parser.add_argument("--sample-rate-khz", type=float, default=192)
+    parser.add_argument(
+        "--dataset-type",
+        choices=["embed2d", "pcapture"],
+        help="dataset type",
+    )
     parser.add_argument("--seed", type=int, default=123)
+    parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--num-train-samples", type=int, default=10_000)
     parser.add_argument("--num-validate-samples", type=int, default=100)
     parser.add_argument(
@@ -358,6 +383,13 @@ def build_parser():
         default=None,
         help="base STFT hop size. dfts to 1/4 --base-stft-win-length. resolutions are (base, base//2, base//4)",
     )
+
+    embed_2d_data_args = parser.add_argument_group("Embed2DQuadratureData")
+    Embed2DQuadratureData.add_args(embed_2d_data_args)
+
+    pcapture_data_args = parser.add_argument_group("ParametricCaptureStaticData")
+    ParametricCaptureStaticData.add_args(pcapture_data_args)
+
     return parser
 
 
