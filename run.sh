@@ -1,6 +1,6 @@
 set -ex
 
-export RUN=118
+export RUN=132
 
 # time uv run -m qkeras_v.train \
 #  --run $RUN \
@@ -18,16 +18,15 @@ export RUN=118
 time uv run -m qkeras_v.train \
  --run $RUN \
  --dataset-type pcapture --capture-run 600 --keras-model 232_keras/i9 \
- --num-fourier-features 80 --rff-scale 5.0 --rff-lut-size 4096 \
+ --num-fourier-features 80 --rff-scale-min 0.05 --rff-scale-max 1.0 --rff-lut-size 4096 \
  --io-fp-int 1 --io-fp-frac 15 \
  --mlp-fp-int 3 --mlp-fp-frac 13 --relu-upper-bound 8 \
  --mlp-dims 24 24 24 \
- --alpha-mse 0.0 --alpha-huber 1.0 \
- --beta-stft-warmup 5 --beta-stft-ramp 20 --beta-stft 0.01 \
- --base-stft-fft-size 2048 --base-stft-win-length 256 \
- --epochs 40 --learning-rate 1e-3 --cosine-schedule \
- --num-train-samples 50_000 --batch-size 128
-
+ --alpha-mse 0.01 --alpha-huber 1.0 \
+ --beta-stft-warmup 10 --beta-stft-ramp 30 --beta-stft 0.01 \
+ --base-stft-fft-size 4096 --base-stft-win-length 1024 \
+ --epochs 160 --learning-rate 1e-3 --cosine-schedule \
+ --num-train-samples 100_000 --batch-size 128
 
 export WEIGHTS_PKL=$PWD/runs/$RUN/weights/qkeras/latest.pkl
 

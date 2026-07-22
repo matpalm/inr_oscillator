@@ -6,7 +6,7 @@ export WEIGHTS_PKL=$PWD/runs/$RUN/weights/qkeras/latest.pkl
 # time uv run -m qkeras_v.train \
 #  --run $RUN \
 #  --dataset-type embed2d --harsh \
-#  --num-fourier-features 32 --rff-scale 0.25 --rff-lut-size 2048 \
+#  --num-fourier-features 32 --rff-scale-min 0.25 --rff-scale-max 0.25 --rff-lut-size 2048 \
 #  --io-fp-int 1 --io-fp-frac 15 \
 #  --mlp-fp-int 3 --mlp-fp-frac 13 --relu-upper-bound 8 \
 #  --mlp-dims 4 4 \
@@ -19,7 +19,7 @@ export WEIGHTS_PKL=$PWD/runs/$RUN/weights/qkeras/latest.pkl
 time uv run -m qkeras_v.train \
  --run $RUN \
  --dataset-type pcapture --capture-run 600 --keras-model 232_keras/i9 \
- --num-fourier-features 32 --rff-scale 0.25 --rff-lut-size 2048 \
+ --num-fourier-features 32 --rff-scale-min 0.25 --rff-scale-max 0.25 --rff-lut-size 2048 \
  --io-fp-int 1 --io-fp-frac 15 \
  --mlp-fp-int 3 --mlp-fp-frac 13 --relu-upper-bound 8 \
  --mlp-dims 4 4 \

@@ -108,7 +108,8 @@ def train(opts):
         },
         "rff": {
             "num_features": opts.num_fourier_features,
-            "scale": opts.rff_scale,
+            "scale_min": opts.rff_scale_min,
+            "scale_max": opts.rff_scale_max,
             "lut_size": opts.rff_lut_size,
             "seed": opts.rff_seed,
         },
@@ -316,10 +317,16 @@ def build_parser():
         help="number of Random Fourier Features (output dim is 2x this)",
     )
     parser.add_argument(
-        "--rff-scale",
+        "--rff-scale-min",
         type=float,
         default=1.0,
-        help="Gaussian std (sigma) for the fixed RFF frequency matrix B",
+        help="minimum Gaussian std (sigma) for per-feature RFF frequencies",
+    )
+    parser.add_argument(
+        "--rff-scale-max",
+        type=float,
+        default=1.0,
+        help="maximum Gaussian std (sigma) for per-feature RFF frequencies",
     )
     parser.add_argument(
         "--rff-lut-size",

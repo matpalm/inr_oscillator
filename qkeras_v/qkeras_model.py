@@ -28,7 +28,8 @@ class QRandomFourierFeatures(Layer):
     def __init__(
         self,
         num_features: int,
-        scale: float,
+        scale_min: float,
+        scale_max: float,
         b_quantizer,
         out_quantizer,
         seed: int = 0,
@@ -36,14 +37,35 @@ class QRandomFourierFeatures(Layer):
     ):
         super().__init__(**kwargs)
         self.num_features = num_features
-        self.scale = scale
+        self.scale_min = scale_min
+        self.scale_max = scale_max
         self.b_quantizer = b_quantizer
         self.out_quantizer = out_quantizer
         self.seed = seed
 
     def build(self, input_shape):
         in_dim = int(input_shape[-1])
-        b_init = tf.random_normal_initializer(stddev=self.scale, seed=self.seed)
+        if self.scale_min <= 0.0 or self.scale_max <= 0.0:
+            raise ValueError("RFF scales must be > 0")
+        if self.scale_min > self.scale_max:
+            raise ValueError("rff scale_min must be <= scale_max")
+
+        rng = np.random.default_rng(seed=self.seed)
+        if self.scale_min == self.scale_max:
+            col_scales = np.full((self.num_features,), self.scale_min, dtype=np.float32)
+        else:
+            log_scales = rng.uniform(
+                low=np.log(self.scale_min),
+                high=np.log(self.scale_max),
+                size=(self.num_features,),
+            )
+            col_scales = np.exp(log_scales).astype(np.float32)
+
+        b_values = (
+            rng.standard_normal(size=(in_dim, self.num_features)).astype(np.float32)
+            * col_scales[None, :]
+        )
+        b_init = tf.constant_initializer(b_values)
         self.B = self.add_weight(
             name="B",
             shape=(in_dim, self.num_features),
@@ -64,7 +86,8 @@ class QRandomFourierFeatures(Layer):
         config.update(
             {
                 "num_features": self.num_features,
-                "scale": self.scale,
+                "scale_min": self.scale_min,
+                "scale_max": self.scale_max,
                 "seed": self.seed,
             }
         )
@@ -90,7 +113,15 @@ class QKerasRFFModelBuilder(object):
         # waveform embedding -> quantised ReLU MLP -> quantised output.
         self.in_d = in_d
         self.rff_num_features = rff["num_features"]
-        self.rff_scale = rff["scale"]
+        scale = rff.get("scale")
+        self.rff_scale_min = rff.get("scale_min", scale)
+        self.rff_scale_max = rff.get("scale_max", scale)
+        if self.rff_scale_min is None or self.rff_scale_max is None:
+            raise ValueError(
+                "rff config must provide scale_min/scale_max (or legacy scale)"
+            )
+        self.rff_scale_min = float(self.rff_scale_min)
+        self.rff_scale_max = float(self.rff_scale_max)
         self.rff_seed = rff["seed"]
         self.mlp_dims = mlp_dims
         self.out_d = out_d
@@ -120,8 +151,9 @@ class QKerasRFFModelBuilder(object):
     # |B| routinely exceeds the weight integer range; size the integer part to
     # cover ~4 sigma so we do not clip the sampled frequencies.
     def b_quantiser(self):
+        max_scale = max(self.rff_scale_min, self.rff_scale_max)
         n_int_b = max(
-            self.mlp_n_int, int(math.ceil(math.log2(max(4.0 * self.rff_scale, 1.0))))
+            self.mlp_n_int, int(math.ceil(math.log2(max(4.0 * max_scale, 1.0))))
         )
         return quantized_bits(bits=n_int_b + self.mlp_n_frac, integer=n_int_b, alpha=1)
 
@@ -155,7 +187,8 @@ class QKerasRFFModelBuilder(object):
         rff_io_quant = self.io_quantiser()
         rff = QRandomFourierFeatures(
             num_features=self.rff_num_features,
-            scale=self.rff_scale,
+            scale_min=self.rff_scale_min,
+            scale_max=self.rff_scale_max,
             b_quantizer=rff_b_quant,
             out_quantizer=rff_io_quant,
             seed=self.rff_seed,
