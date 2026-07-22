@@ -1,32 +1,32 @@
 set -ex
 
-rm -rf runs/{998,999} || true
+rm -rf runs/{996,997} || true
 
-export RUN=998
+export RUN=996
 time uv run -m keras_v.train \
  --run $RUN \
  --dataset-type pcapture --capture-run 600 --keras-model 232_keras/i9 \
- --num-fourier-features 32 --rff-scale-min 0.25 --rff-scale-max 0.25 \
- --mlp-dims 4 4 \
- --alpha-mse 0.0 --alpha-huber 1.0 \
- --beta-stft-warmup 0 --beta-stft-ramp 0 --beta-stft 0.001 \
+ --num-fourier-features 64 --rff-scale-min 0.05 --rff-scale-max 1.0 \
+ --mlp-dims 8 8 8 8 \
+ --alpha-mse 0.01 --alpha-huber 1.0 \
+ --beta-stft-warmup 5 --beta-stft-ramp 5 --beta-stft 0.001 \
  --base-stft-fft-size 2048 --base-stft-win-length 256 \
- --epochs 1 --learning-rate 1e-3  \
- --num-train-samples 100 --batch-size 32
+ --epochs 20 --learning-rate 1e-3  \
+ --num-train-samples 5_000 --batch-size 32
 
-export RUN=999
+export RUN=997
 time uv run -m qkeras_v.train \
  --run $RUN \
  --dataset-type pcapture --capture-run 600 --keras-model 232_keras/i9 \
- --num-fourier-features 32 --rff-scale-min 0.25 --rff-scale-max 0.25 --rff-lut-size 2048 \
+ --num-fourier-features 64 --rff-scale-min 0.05 --rff-scale-max 1.0 --rff-lut-size 2048 \
  --io-fp-int 1 --io-fp-frac 15 \
  --mlp-fp-int 3 --mlp-fp-frac 13 --relu-upper-bound 8 \
- --mlp-dims 4 4 \
- --alpha-mse 0.0 --alpha-huber 1.0 \
- --beta-stft-warmup 0 --beta-stft-ramp 0 --beta-stft 0.001 \
+ --mlp-dims 8 8 8 8 \
+ --alpha-mse 0.01 --alpha-huber 1.0 \
+ --beta-stft-warmup 5 --beta-stft-ramp 5 --beta-stft 0.001 \
  --base-stft-fft-size 2048 --base-stft-win-length 256 \
- --epochs 1 --learning-rate 1e-3  \
- --num-train-samples 100 --batch-size 32
+ --epochs 20 --learning-rate 1e-3  \
+ --num-train-samples 5_000 --batch-size 32
 
 export WEIGHTS_PKL=$PWD/runs/$RUN/weights/qkeras/latest.pkl
 uv run -m unittest test_equivalences.test_dense_equivalence

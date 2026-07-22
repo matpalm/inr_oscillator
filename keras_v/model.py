@@ -19,15 +19,43 @@ class RandomFourierFeatures(Layer):
     Output dimensionality is 2 * num_features.
     """
 
-    def __init__(self, num_features: int, scale: float, seed: int = 0, **kwargs):
+    def __init__(
+        self,
+        num_features: int,
+        scale_min: float,
+        scale_max: float,
+        seed: int = 0,
+        **kwargs,
+    ):
         super().__init__(**kwargs)
         self.num_features = num_features
-        self.scale = scale
+        self.scale_min = scale_min
+        self.scale_max = scale_max
         self.seed = seed
 
     def build(self, input_shape):
         in_dim = int(input_shape[-1])
-        b_init = tf.random_normal_initializer(stddev=self.scale, seed=self.seed)
+        if self.scale_min <= 0.0 or self.scale_max <= 0.0:
+            raise ValueError("RFF scales must be > 0")
+        if self.scale_min > self.scale_max:
+            raise ValueError("rff scale_min must be <= scale_max")
+
+        rng = np.random.default_rng(seed=self.seed)
+        if self.scale_min == self.scale_max:
+            col_scales = np.full((self.num_features,), self.scale_min, dtype=np.float32)
+        else:
+            log_scales = rng.uniform(
+                low=np.log(self.scale_min),
+                high=np.log(self.scale_max),
+                size=(self.num_features,),
+            )
+            col_scales = np.exp(log_scales).astype(np.float32)
+
+        b_values = (
+            rng.standard_normal(size=(in_dim, self.num_features)).astype(np.float32)
+            * col_scales[None, :]
+        )
+        b_init = tf.constant_initializer(b_values)
         self.B = self.add_weight(
             name="B",
             shape=(in_dim, self.num_features),
@@ -45,7 +73,8 @@ class RandomFourierFeatures(Layer):
         config.update(
             {
                 "num_features": self.num_features,
-                "scale": self.scale,
+                "scale_min": self.scale_min,
+                "scale_max": self.scale_max,
                 "seed": self.seed,
             }
         )
@@ -67,12 +96,9 @@ def create_rff_inr_model_from_config_and_latest_ckpt(run: str):
 
 def create_rff_inr_model(
     in_d: int,
-    num_fourier_features: int,
-    rff_scale: float,
-    mlp_layers: int,
-    mlp_dim: int,
+    rff: dict,
+    mlp_dims: list[int],
     out_d: int,
-    rff_seed: int = 0,
 ):
     # creates an implicit neural representation (INR) model:
     #   map the phase angle through fixed Random Fourier
@@ -88,14 +114,15 @@ def create_rff_inr_model(
     embed = Lambda(lambda t: t[..., 1:in_d], name="embed")(inp)
 
     rff = RandomFourierFeatures(
-        num_features=num_fourier_features,
-        scale=rff_scale,
-        seed=rff_seed,
+        num_features=rff["num_features"],
+        scale_min=rff["scale_min"],
+        scale_max=rff["scale_max"],
+        seed=rff["seed"],
         name="rff",
     )(phase)
 
     h = Concatenate(name="rff_embed")([rff, embed])
-    for i in range(mlp_layers):
+    for i, mlp_dim in enumerate(mlp_dims):
         h = Dense(mlp_dim, activation="relu", name=f"mlp{i}")(h)
 
     y_pred = Dense(out_d, activation=None, name="y_pred")(h)

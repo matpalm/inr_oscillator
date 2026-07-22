@@ -183,6 +183,7 @@ class ParametricCaptureStaticData(object):
         batch_size: int,
         emit_weights: bool,
         rnd_flip_a_b: bool = False,
+        deterministic: bool = False,
     ):
         """
         Generate num_samples samples of shape (batch_size, seq_len, 4)
@@ -195,21 +196,27 @@ class ParametricCaptureStaticData(object):
             batch_size: batch size
             emit_weight: if set we return _weight as 3rd tuple element
             rnd_flip_a_b: if set then 1/2 times we flip a_cv and b_cv and set -morph_cv
+            deterministic: true if we want same first set each time
         """
 
+        if deterministic:
+            local_rng = np.random.default_rng(seed=123)
+        else:
+            local_rng = self.rng
+
         num_examples = num_batches * batch_size
-        sampled_idxs = self.rng.choice(
+        sampled_idxs = local_rng.choice(
             self.n_chunks,
             size=num_examples,
             p=self.sampling_probabilies,
         ).astype(np.int32)
-        sampled_seq_from = self.rng.integers(
+        sampled_seq_from = local_rng.integers(
             low=IGNORE_FADE_LEN,
             high=self.seq_len - IGNORE_FADE_LEN - seq_len,
             size=num_examples,
         ).astype(np.int32)
         sampled_flip_a_b = (
-            self.rng.uniform(size=num_examples) < 0.5
+            local_rng.uniform(size=num_examples) < 0.5
             if rnd_flip_a_b
             else np.zeros(num_examples, dtype=np.bool_)
         )
@@ -247,7 +254,9 @@ class ParametricCaptureStaticData(object):
 
             return xs, ys
 
-        ds = ds.shuffle(512)
+        if not deterministic:
+            ds = ds.shuffle(512)
+
         ds = ds.map(
             fetch_record,
             num_parallel_calls=tf.data.AUTOTUNE,

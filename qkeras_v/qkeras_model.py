@@ -114,14 +114,8 @@ class QKerasRFFModelBuilder(object):
         self.in_d = in_d
         self.rff_num_features = rff["num_features"]
         scale = rff.get("scale")
-        self.rff_scale_min = rff.get("scale_min", scale)
-        self.rff_scale_max = rff.get("scale_max", scale)
-        if self.rff_scale_min is None or self.rff_scale_max is None:
-            raise ValueError(
-                "rff config must provide scale_min/scale_max (or legacy scale)"
-            )
-        self.rff_scale_min = float(self.rff_scale_min)
-        self.rff_scale_max = float(self.rff_scale_max)
+        self.rff_scale_min = float(rff.get("scale_min", scale))
+        self.rff_scale_max = float(rff.get("scale_max", scale))
         self.rff_seed = rff["seed"]
         self.mlp_dims = mlp_dims
         self.out_d = out_d

@@ -47,10 +47,9 @@ def train(opts):
     with open(run_path / "opts.json", "w") as f:
         json.dump(vars(opts), f, default=str)
 
-    TRAIN_SEQ_LEN = 10 * opts.base_stft_win_length
-    TEST_SEQ_LEN = 2048
-    print("TRAIN_SEQ_LEN", TRAIN_SEQ_LEN)
-    print("TEST_SEQ_LEN", TEST_SEQ_LEN)
+    train_seq_len = int(opts.train_seq_mult * opts.base_stft_win_length)
+    print("TRAIN_SEQ_LEN", train_seq_len)
+    print("TEST_SEQ_LEN", opts.test_seq_len)
 
     if opts.dataset_type == "embed2d":
         data = Embed2DQuadratureData(
@@ -62,14 +61,14 @@ def train(opts):
         )
         train_ds = data.tf_dataset(
             batch_size=opts.batch_size,
-            seq_len=TRAIN_SEQ_LEN,
+            seq_len=train_seq_len,
             num_samples=opts.num_train_samples,
             emit_endpt_samples=True,
             emit_interpolated_samples=True,
         )
         validate_ds = data.tf_dataset(
             batch_size=opts.batch_size,
-            seq_len=TEST_SEQ_LEN,
+            seq_len=opts.test_seq_len,
             num_samples=opts.num_validate_samples,
             emit_endpt_samples=True,
             emit_interpolated_samples=True,
@@ -81,18 +80,20 @@ def train(opts):
             seed=123,
         )
         train_ds = data.tf_training_dataset(
-            seq_len=TRAIN_SEQ_LEN,
+            seq_len=train_seq_len,
             num_batches=opts.num_train_samples // opts.batch_size,
             batch_size=opts.batch_size,
             emit_weights=True,
             rnd_flip_a_b=True,
+            deterministic=False,
         )
         validate_ds = data.tf_training_dataset(
-            seq_len=TEST_SEQ_LEN,
+            seq_len=opts.test_seq_len,
             num_batches=opts.num_train_samples // opts.batch_size,
             batch_size=opts.batch_size,
             emit_weights=False,
             rnd_flip_a_b=False,
+            deterministic=True,
         )
     else:
         raise Exception("unknown --dataset-type")
@@ -201,11 +202,12 @@ def train(opts):
         alpha_huber=opts.alpha_huber,
         beta_stft=beta_stft,
         reduce_mean=False,
-        seq_len=TRAIN_SEQ_LEN,
+        seq_len=train_seq_len,
         stft_fft_sizes=halving_triple(opts.base_stft_fft_size),
         stft_win_lengths=halving_triple(opts.base_stft_win_length),
         stft_hop_sizes=stft_hop_sizes,
     )
+
     if opts.cosine_schedule:
         lr_warmup_epochs = opts.beta_stft_warmup + opts.beta_stft_ramp
         steps_per_epoch = max(1, opts.num_train_samples // opts.batch_size)
@@ -274,6 +276,18 @@ def build_parser():
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--num-train-samples", type=int, default=10_000)
     parser.add_argument("--num-validate-samples", type=int, default=100)
+    parser.add_argument(
+        "--train-seq-mult",
+        type=float,
+        default=10,
+        help="set training seqlen to base-stft-win-len * this",
+    )
+    parser.add_argument(
+        "--test-seq-len",
+        type=int,
+        default=2048,
+        help="for graphs etc",
+    )
     parser.add_argument(
         "--mlp-fp-int",
         type=int,

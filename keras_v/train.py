@@ -13,12 +13,13 @@ import argparse
 from tensorflow.keras.optimizers import AdamW
 
 from .model import create_rff_inr_model
-from common.util import CheckYPred
 from tf_data.quadrature_data import Embed2DQuadratureData
+from tf_data.pcapture_static_data import ParametricCaptureStaticData
 from common.losses import combined_loss_terms
 from common.callbacks import (
     setup_beta_stft_var_and_update_callback,
     LogLrAndBetaStft,
+    CheckYPred,
 )
 
 def train(opts):
@@ -36,42 +37,68 @@ def train(opts):
 
     in_d = 3  # phase, embed0, embed1
     out_d = 1  # output wave
-    TRAIN_SEQ_LEN = 4 * opts.base_stft_win_length
-    TEST_SEQ_LEN = 2048
-    print("TRAIN_SEQ_LEN", TRAIN_SEQ_LEN)
-    print("TEST_SEQ_LEN", TEST_SEQ_LEN)
+    train_seq_len = int(opts.train_seq_mult * opts.base_stft_win_length)
+    print("TRAIN_SEQ_LEN", train_seq_len)
+    print("TEST_SEQ_LEN", opts.test_seq_len)
 
-    data = Embed2DQuadratureData(
-        min_note=opts.min_note,
-        max_note=opts.max_note,
-        sample_rate_khz=opts.sample_rate_khz,
-        harsh=opts.harsh,
-        seed=opts.seed,
-    )
-    train_ds = data.tf_dataset(
-        batch_size=opts.batch_size,
-        seq_len=TRAIN_SEQ_LEN,
-        num_samples=opts.num_train_samples,
-        emit_endpt_samples=True,
-        emit_interpolated_samples=True,
-    )
-    validate_ds = data.tf_dataset(
-        batch_size=opts.batch_size,
-        seq_len=TEST_SEQ_LEN,
-        num_samples=opts.num_validate_samples,
-        emit_endpt_samples=True,
-        emit_interpolated_samples=True,
-    )
+    if opts.dataset_type == "embed2d":
+        data = Embed2DQuadratureData(
+            min_note=opts.min_note,
+            max_note=opts.max_note,
+            sample_rate_khz=opts.sample_rate_khz,
+            harsh=opts.harsh,
+            seed=opts.seed,
+        )
+        train_ds = data.tf_dataset(
+            batch_size=opts.batch_size,
+            seq_len=train_seq_len,
+            num_samples=opts.num_train_samples,
+            emit_endpt_samples=True,
+            emit_interpolated_samples=True,
+        )
+        validate_ds = data.tf_dataset(
+            batch_size=opts.batch_size,
+            seq_len=opts.test_seq_len,
+            num_samples=opts.num_validate_samples,
+            emit_endpt_samples=True,
+            emit_interpolated_samples=True,
+        )
+    elif opts.dataset_type == "pcapture":
+        data = ParametricCaptureStaticData(
+            capture_run=opts.capture_run,
+            keras_model=opts.keras_model,
+            seed=123,
+        )
+        train_ds = data.tf_training_dataset(
+            seq_len=train_seq_len,
+            num_batches=opts.num_train_samples // opts.batch_size,
+            batch_size=opts.batch_size,
+            emit_weights=True,
+            rnd_flip_a_b=True,
+            deterministic=False,
+        )
+        validate_ds = data.tf_training_dataset(
+            seq_len=opts.test_seq_len,
+            num_batches=opts.num_train_samples // opts.batch_size,
+            batch_size=opts.batch_size,
+            emit_weights=False,
+            rnd_flip_a_b=False,
+            deterministic=True,
+        )
+    else:
+        raise Exception("unknown --dataset-type")
 
     # make model
     model_config = {
-        "in_d": in_d,
-        "num_fourier_features": opts.num_fourier_features,
-        "rff_scale": opts.rff_scale,
-        "mlp_layers": opts.mlp_layers,
-        "mlp_dim": opts.mlp_dim,
-        "out_d": out_d,
-        "rff_seed": opts.rff_seed,
+        "in_d": data.in_d(),
+        "rff": {
+            "num_features": opts.num_fourier_features,
+            "scale_min": opts.rff_scale_min,
+            "scale_max": opts.rff_scale_max,
+            "seed": opts.rff_seed,
+        },
+        "mlp_dims": opts.mlp_dims,
+        "out_d": data.out_d(),
     }
     print("model_config", model_config)
     with open(run_path / "model_config.json", "w") as f:
@@ -120,12 +147,43 @@ def train(opts):
         alpha_mse=opts.alpha_mse,
         alpha_huber=opts.alpha_huber,
         beta_stft=beta_stft,
-        seq_len=TRAIN_SEQ_LEN,
+        reduce_mean=False,
+        seq_len=train_seq_len,
         stft_fft_sizes=halving_triple(opts.base_stft_fft_size),
         stft_win_lengths=halving_triple(opts.base_stft_win_length),
         stft_hop_sizes=stft_hop_sizes,
     )
-    optimizer = AdamW(opts.learning_rate, weight_decay=opts.weight_decay)
+
+    if opts.cosine_schedule:
+        lr_warmup_epochs = opts.beta_stft_warmup + opts.beta_stft_ramp
+        steps_per_epoch = max(1, opts.num_train_samples // opts.batch_size)
+        total_steps = opts.epochs * steps_per_epoch
+        warmup_steps = lr_warmup_epochs * steps_per_epoch
+        if warmup_steps > 0:
+            lr_schedule = tf.keras.optimizers.schedules.CosineDecay(
+                initial_learning_rate=0.0,
+                decay_steps=max(1, total_steps - warmup_steps),
+                alpha=opts.lr_min_frac,
+                warmup_target=opts.learning_rate,
+                warmup_steps=warmup_steps,
+            )
+        else:
+            lr_schedule = tf.keras.optimizers.schedules.CosineDecay(
+                initial_learning_rate=opts.learning_rate,
+                decay_steps=max(1, total_steps),
+                alpha=opts.lr_min_frac,
+            )
+        print(
+            "lr schedule: cosine decay"
+            f" lr={opts.learning_rate} warmup_epochs={lr_warmup_epochs}"
+            f" total_steps={total_steps} steps_per_epoch={steps_per_epoch}"
+            f" min_frac={opts.lr_min_frac}"
+        )
+    else:
+        lr_schedule = opts.learning_rate
+        print(f"lr schedule: fixed lr={opts.learning_rate}")
+
+    optimizer = AdamW(lr_schedule, weight_decay=opts.weight_decay)
     train_model.compile(
         optimizer,
         loss=combined_loss_fn,
@@ -143,15 +201,39 @@ def build_parser():
     parser.add_argument("--run", type=Path, required=True)
     parser.add_argument("--learning-rate", type=float, default=1e-3)
     parser.add_argument("--weight-decay", type=float, default=1e-3)
+    parser.add_argument(
+        "--cosine-schedule",
+        action="store_true",
+        help="if set, use linear warmup + cosine decay; otherwise use a fixed learning rate",
+    )
+    parser.add_argument(
+        "--lr-min-frac",
+        type=float,
+        default=0.01,
+        help="cosine decay floor as a fraction of --learning-rate (0 => decay to 0)",
+    )
     parser.add_argument("--epochs", type=int, default=10)
+    parser.add_argument(
+        "--dataset-type",
+        choices=["embed2d", "pcapture"],
+        help="dataset type",
+    )
     parser.add_argument("--batch-size", type=int, default=32)
-    parser.add_argument("--min-note", type=str, default="A3")
-    parser.add_argument("--max-note", type=str, default="A5")
-    parser.add_argument("--harsh", action="store_true")
-    parser.add_argument("--sample-rate-khz", type=float, default=192)
     parser.add_argument("--seed", type=int, default=123)
     parser.add_argument("--num-train-samples", type=int, default=10_000)
     parser.add_argument("--num-validate-samples", type=int, default=100)
+    parser.add_argument(
+        "--train-seq-mult",
+        type=float,
+        default=10,
+        help="set training seqlen to base-stft-win-len * this",
+    )
+    parser.add_argument(
+        "--test-seq-len",
+        type=int,
+        default=2048,
+        help="for graphs etc",
+    )
     parser.add_argument(
         "--num-fourier-features",
         type=int,
@@ -159,14 +241,25 @@ def build_parser():
         help="number of Random Fourier Features (output dim is 2x this)",
     )
     parser.add_argument(
-        "--rff-scale",
+        "--rff-scale-min",
         type=float,
         default=5.0,
-        help="Gaussian std (sigma) for the fixed RFF frequency matrix B",
+        help="minimum Gaussian std (sigma) for the fixed RFF frequency matrix B",
+    )
+    parser.add_argument(
+        "--rff-scale-max",
+        type=float,
+        default=5.0,
+        help="maximum Gaussian std (sigma) for the fixed RFF frequency matrix B",
     )
     parser.add_argument("--rff-seed", type=int, default=0)
-    parser.add_argument("--mlp-layers", type=int, default=2)
-    parser.add_argument("--mlp-dim", type=int, default=16)
+    parser.add_argument(
+        "--mlp-dims",
+        type=int,
+        nargs="+",
+        default=[16, 16],
+        help="per-layer node counts, e.g. --mlp-dims 8 32 32 => 3 layers",
+    )
     parser.add_argument(
         "--alpha-mse",
         type=float,
@@ -215,6 +308,13 @@ def build_parser():
         default=None,
         help="base STFT hop size. dfts to 1/4 --base-stft-win-length. resolutions are (base, base//2, base//4)",
     )
+
+    embed_2d_data_args = parser.add_argument_group("Embed2DQuadratureData")
+    Embed2DQuadratureData.add_args(embed_2d_data_args)
+
+    pcapture_data_args = parser.add_argument_group("ParametricCaptureStaticData")
+    ParametricCaptureStaticData.add_args(pcapture_data_args)
+
     return parser
 
 
