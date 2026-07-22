@@ -103,7 +103,7 @@ class CheckYPred(tf.keras.callbacks.Callback):
 
         # TODO: clumsy to assume run in tb dir :/
         run_dir = Path(tb_dir).parent
-        self.run = int(run_dir.name)
+        self.run = run_dir.name
         self.validation_plots_dir = run_dir / "validation_plots"
         self.validation_plots_dir.mkdir(parents=True, exist_ok=True)
 
@@ -129,7 +129,7 @@ class CheckYPred(tf.keras.callbacks.Callback):
                 fig, ax = plt.subplots(figsize=(30, 5))
                 sns.lineplot(wide_df, x="n", y="value", hue="variable", ax=ax)
                 ax.set_ylim((-1.1, 1.1))
-                ax.set_title(f"run {self.run:04d}")
+                ax.set_title(f"run {self.run}")
                 fig.savefig(img_buffer, format="png")
                 plt.close(fig)
             img_buffer.seek(0)
@@ -152,7 +152,7 @@ class CheckYPred(tf.keras.callbacks.Callback):
                     imgs.append(img)
                     save_path = (
                         self.validation_plots_dir
-                        / f"r{self.run:04d}_e{epoch:04d}_eg{i:02d}.jpg"
+                        / f"r{self.run}_e{epoch:04d}_eg{i:02d}.jpg"
                     )
                     Image.fromarray(img).save(save_path)
                 imgs = np.stack(imgs)

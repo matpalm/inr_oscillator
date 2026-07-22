@@ -14,7 +14,8 @@ from tensorflow.keras.optimizers import AdamW
 
 from .model import create_rff_inr_model
 from tf_data.quadrature_data import Embed2DQuadratureData
-from tf_data.pcapture_static_data import ParametricCaptureStaticData
+# from tf_data.pcapture_static_data import ParametricCaptureStaticData
+from tf_data.pcapture_inmem_data import ParametricCaptureStaticData
 from common.losses import combined_loss_terms
 from common.callbacks import (
     setup_beta_stft_var_and_update_callback,
@@ -74,7 +75,7 @@ def train(opts):
             num_batches=opts.num_train_samples // opts.batch_size,
             batch_size=opts.batch_size,
             emit_weights=True,
-            rnd_flip_a_b=True,
+            rnd_flip_a_b=False,
             deterministic=False,
         )
         validate_ds = data.tf_training_dataset(

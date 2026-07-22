@@ -104,6 +104,20 @@ class RffNetwork(wiring.Component):
             f" io_shape={self.io_shape!r} lut_size={self.lut_size}"
         )
 
+        # looks like for INR against zpo results in model ignoring in3 ( morph )
+        # sanity check these cases by printing weights mag for embed -> mlp0
+        num_rff = 2 * self.num_features
+        embed_abs_means = [
+            float(np.abs(w0[num_rff + j]).mean()) for j in range(self.embed_dim)
+        ]
+        ref = max(embed_abs_means) if embed_abs_means else 0.0
+        for j, w_abs_mean in enumerate(embed_abs_means):
+            row = w0[num_rff + j]
+            print(
+                f"  embed{j} (net in{j + 1}) |w|_mean={w_abs_mean:.5f}"
+                f" max={float(np.abs(row).max()):.5f}"
+            )
+
         super().__init__(
             {
                 "i": In(stream.Signature(data.ArrayLayout(self.io_shape, self.in_d))),
