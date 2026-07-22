@@ -159,3 +159,45 @@ class CheckYPred(tf.keras.callbacks.Callback):
                 tf.summary.image(
                     "check_ypred", imgs, max_outputs=len(plot_x), step=epoch
                 )
+
+
+class PrintRffMlp0Weights(tf.keras.callbacks.Callback):
+    """
+    RFF outputs concat([cos(proj), sin(proj)]), so frequency k maps to
+    mlp0 kernel rows k and num_features + k. dump per-frequency group norms
+    (over both rows and all mlp0 outputs).
+    """
+
+    def __init__(self, num_features: int, freq: int = 10):
+        super().__init__()
+        self.num_features = num_features
+        self.freq = freq
+
+    def _print(self, epoch):
+        kernel = self.model.get_layer("mlp0").kernel.numpy()  # (in_d, mlp0_out)
+        rff_rows = kernel[: 2 * self.num_features]  # (2*nf, mlp0_out)
+        cos_rows = rff_rows[: self.num_features]
+        sin_rows = rff_rows[self.num_features : 2 * self.num_features]
+
+        # per-frequency group norm over {cos_k, sin_k} AND all mlp0 outputs
+        # ( can't be just L1 on RFF since optimiser can just bump mlp0 W values up )
+        group_norm = np.sqrt((cos_rows**2).sum(axis=1) + (sin_rows**2).sum(axis=1))
+
+        try:
+            gate = self.model.get_layer("rff_gate").w.numpy()  # (nf,)
+        except ValueError:
+            gate = None
+
+        importance = group_norm if gate is None else np.abs(gate) * group_norm
+        importance_deciles = np.percentile(importance, np.linspace(0, 100, 11))
+        print(f"importance: deciles {np.around(importance_deciles, 2)}")
+
+        thresh = 0.01 * importance.max() if importance.max() > 0 else 0.0
+        num_near_zero = int((importance < thresh).sum())
+        print(
+            f"importance: num_features={self.num_features} & num_non_zero={self.num_features - num_near_zero} (where zero is 0.01 of max)"
+        )
+
+    def on_epoch_end(self, epoch, logs=None):
+        if epoch == 0 or (epoch + 1) % self.freq == 0:
+            self._print(epoch)

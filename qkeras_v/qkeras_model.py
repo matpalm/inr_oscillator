@@ -98,6 +98,62 @@ class QRandomFourierFeatures(Layer):
 #     return QKerasRFFModelBuilder(**model_config)._get_b_io_quant_sizes()
 
 
+class QRffInrModel(Model):
+    """Quantised RFF-INR model with an optional morph-consistency aux loss."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._lambda_morph_consistency = 0.0
+        self._morph_consistency_tracker = tf.keras.metrics.Mean(
+            name="morph_consistency"
+        )
+
+    def enable_morph_consistency(self, lambda_value: float):
+        in_d = int(self.input_shape[-1])
+        if in_d != 4:
+            raise ValueError("expected (in_d==4), got in_d={in_d}")
+        self._lambda_morph_consistency = float(lambda_value)
+
+    @staticmethod
+    def _flip_ab_morph(x):
+        # [phase, a_cv, b_cv, morph] -> [phase, b_cv, a_cv, -morph]
+        phase = x[..., 0:1]
+        a_cv = x[..., 1:2]
+        b_cv = x[..., 2:3]
+        morph = x[..., 3:4]
+        return tf.concat([phase, b_cv, a_cv, -morph], axis=-1)
+
+    def _morph_consistency(self, x, y_pred, training):
+        if self._lambda_morph_consistency <= 0.0:
+            return tf.constant(0.0, dtype=y_pred.dtype)
+        y_pred_flip = self(self._flip_ab_morph(x), training=training)
+        return tf.reduce_mean(tf.square(y_pred - y_pred_flip))
+
+    def train_step(self, data):
+        x, y, sample_weight = tf.keras.utils.unpack_x_y_sample_weight(data)
+        with tf.GradientTape() as tape:
+            y_pred = self(x, training=True)
+            loss = self.compiled_loss(
+                y, y_pred, sample_weight, regularization_losses=self.losses
+            )
+            consistency = self._morph_consistency(x, y_pred, training=True)
+            loss = loss + self._lambda_morph_consistency * consistency
+        grads = tape.gradient(loss, self.trainable_variables)
+        self.optimizer.apply_gradients(zip(grads, self.trainable_variables))
+        self.compiled_metrics.update_state(y, y_pred, sample_weight)
+        self._morph_consistency_tracker.update_state(consistency)
+        return {m.name: m.result() for m in self.metrics}
+
+    def test_step(self, data):
+        x, y, sample_weight = tf.keras.utils.unpack_x_y_sample_weight(data)
+        y_pred = self(x, training=False)
+        self.compiled_loss(y, y_pred, sample_weight, regularization_losses=self.losses)
+        consistency = self._morph_consistency(x, y_pred, training=False)
+        self.compiled_metrics.update_state(y, y_pred, sample_weight)
+        self._morph_consistency_tracker.update_state(consistency)
+        return {m.name: m.result() for m in self.metrics}
+
+
 class QKerasRFFModelBuilder(object):
 
     def __init__(
@@ -209,7 +265,7 @@ class QKerasRFFModelBuilder(object):
         # TODO: should we keep this as self.quantiser as cdcc did?
         y_pred = QActivation(self.io_quantiser(), name="qout")(y_pred)
 
-        return Model(inp, y_pred)
+        return QRffInrModel(inp, y_pred)
 
 
 def build_model_from_config_and_latest_ckpt(run: str):

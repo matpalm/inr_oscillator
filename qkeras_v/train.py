@@ -17,8 +17,11 @@ from tensorflow.keras.optimizers import AdamW
 from qkeras.utils import model_save_quantized_weights
 
 from .qkeras_model import QKerasRFFModelBuilder
+from keras_v.model import create_rff_inr_model, prune_rff_by_l1
 from tf_data.quadrature_data import Embed2DQuadratureData
-from tf_data.pcapture_static_data import ParametricCaptureStaticData
+
+# from tf_data.pcapture_static_data import ParametricCaptureStaticData
+from tf_data.pcapture_inmem_data import ParametricCaptureStaticData
 from common.losses import combined_loss_terms
 from common.callbacks import (
     setup_beta_stft_var_and_update_callback,
@@ -29,7 +32,6 @@ from common.callbacks import (
 warnings.filterwarnings(
     "ignore", category=UserWarning, message=r".*API should only be used for objects.*"
 )
-
 
 def train(opts):
     print("opts", opts)
@@ -84,7 +86,6 @@ def train(opts):
             num_batches=opts.num_train_samples // opts.batch_size,
             batch_size=opts.batch_size,
             emit_weights=True,
-            rnd_flip_a_b=True,
             deterministic=False,
         )
         validate_ds = data.tf_training_dataset(
@@ -92,7 +93,6 @@ def train(opts):
             num_batches=opts.num_train_samples // opts.batch_size,
             batch_size=opts.batch_size,
             emit_weights=False,
-            rnd_flip_a_b=False,
             deterministic=True,
         )
     else:
@@ -129,6 +129,9 @@ def train(opts):
 
     train_model = builder.build()
 
+    if opts.lambda_morph_consistency > 0.0:
+        train_model.enable_morph_consistency(opts.lambda_morph_consistency)
+
     train_model.summary()
     with open(run_path / "qkeras_model.summary.txt", "w") as f:
         train_model.summary(print_fn=lambda line: f.write(line + "\n"))
@@ -136,12 +139,54 @@ def train(opts):
     # optionally initialise from prior (float keras_v or qkeras_v) weights for fine-tuning
     init_weights_path = None
     if opts.init_weights is not None:
+        if opts.init_from_run is not None:
+            raise Exception("either --init-weights or --init-from-run but not both")
         if opts.init_weights.is_dir():
             init_weights_path = str(sorted(opts.init_weights.iterdir())[-1])
         else:
             init_weights_path = str(opts.init_weights)
         print("init weights from", init_weights_path)
         train_model.load_weights(init_weights_path)
+
+    # optionally initialise B (top --num-fourier-features frequencies) and all
+    # mlp weights from a prior float keras_v run, using the prune_rff_by_l1
+    # selection + gate-fold. This picks the best frequencies from an
+    # overcomplete, L1-gated float model to seed the (small) qkeras model.
+    if opts.init_from_run is not None:
+        if opts.init_weights is not None:
+            raise Exception("either --init-weights or --init-from-run but not both")
+
+        # init model from old config
+        with open("runs" / opts.init_from_run / "model_config.json") as f:
+            src_config = json.load(f)
+        if src_config["mlp_dims"] != opts.mlp_dims:
+            raise Exception("can't init from run with different --mlp-dims")
+        src_model = create_rff_inr_model(**src_config)
+
+        # load latest weights
+        src_ckpts = sorted(
+            ("runs" / opts.init_from_run / "weights" / "keras").glob("*.weights.h5")
+        )
+        if not src_ckpts:
+            raise Exception(f"no keras weights in {src_dir / 'weights' / 'keras'}")
+        print("using source ckpt", src_ckpts[-1])
+        src_model.load_weights(str(src_ckpts[-1]))
+
+        keep_k = opts.num_fourier_features
+        pruned_model, _, selected_idxs = prune_rff_by_l1(src_model, src_config, keep_k)
+        print(
+            f"selected top {keep_k}/{src_config['rff']['num_features']} "
+            f"frequencies: {selected_idxs.tolist()}"
+        )
+
+        # selected (folded) frequency matrix B into the qkeras RFF layer
+        train_model.get_layer("rff").B.assign(pruned_model.get_layer("rff").B.numpy())
+
+        # folded mlp0 + remaining mlp/output weights into the QDense layers
+        for layer in pruned_model.layers:
+            if layer.name == "rff" or not layer.weights:
+                continue
+            train_model.get_layer(layer.name).set_weights(layer.get_weights())
 
     ramp_callback, beta_stft = setup_beta_stft_var_and_update_callback(
         opts.epochs, opts.beta_stft_warmup, opts.beta_stft_ramp, opts.beta_stft
@@ -322,7 +367,13 @@ def build_parser():
         "--init-weights",
         type=Path,
         default=None,
-        help="path (dir or file) to keras-format weights to initialise fine-tuning",
+        help="path to keras-format weights to initialise fine-tuning",
+    )
+    parser.add_argument(
+        "--init-from-run",
+        type=Path,
+        default=None,
+        help="path to run for model_config and keras weights for initing top fourier features",
     )
     parser.add_argument(
         "--num-fourier-features",
@@ -373,6 +424,13 @@ def build_parser():
         type=float,
         default=0.0001,
         help="target STFT-loss weight in combined loss (after warmup and ramp)",
+    )
+    parser.add_argument(
+        "--lambda-morph-consistency",
+        type=float,
+        default=0.0,
+        help="weight for the morph-consistency aux loss lambda*||f(x)-f(x')||^2 "
+        "where x' swaps a_cv/b_cv and negates morph (pcapture in_d==4 only)",
     )
     parser.add_argument(
         "--beta-stft-warmup",

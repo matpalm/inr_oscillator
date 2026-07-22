@@ -21,6 +21,7 @@ from common.callbacks import (
     setup_beta_stft_var_and_update_callback,
     LogLrAndBetaStft,
     CheckYPred,
+    PrintRffMlp0Weights,
 )
 
 def train(opts):
@@ -75,7 +76,6 @@ def train(opts):
             num_batches=opts.num_train_samples // opts.batch_size,
             batch_size=opts.batch_size,
             emit_weights=True,
-            rnd_flip_a_b=False,
             deterministic=False,
         )
         validate_ds = data.tf_training_dataset(
@@ -83,7 +83,6 @@ def train(opts):
             num_batches=opts.num_train_samples // opts.batch_size,
             batch_size=opts.batch_size,
             emit_weights=False,
-            rnd_flip_a_b=False,
             deterministic=True,
         )
     else:
@@ -99,12 +98,17 @@ def train(opts):
             "seed": opts.rff_seed,
         },
         "mlp_dims": opts.mlp_dims,
+        "mlp_activation": opts.mlp_activation,
         "out_d": data.out_d(),
+        "rff_l1": opts.rff_l1,
     }
     print("model_config", model_config)
     with open(run_path / "model_config.json", "w") as f:
         json.dump(model_config, f)
     train_model = create_rff_inr_model(**model_config)
+
+    if opts.lambda_morph_consistency > 0.0:
+        train_model.enable_morph_consistency(opts.lambda_morph_consistency)
 
     train_model.summary()
     with open(run_path / "train_model_summary.txt", "w") as f:
@@ -126,6 +130,9 @@ def train(opts):
         )
     )
     callbacks.append(CheckYPred(tb_dir=str(tensorboard_dir), dataset=validate_ds))
+    callbacks.append(
+        PrintRffMlp0Weights(num_features=opts.num_fourier_features, freq=10)
+    )
     if ramp_callback is not None:
         callbacks.append(ramp_callback)
 
@@ -242,6 +249,12 @@ def build_parser():
         help="number of Random Fourier Features (output dim is 2x this)",
     )
     parser.add_argument(
+        "--rff-l1",
+        type=float,
+        default=0.0,
+        help="L1 weight on a per-frequency RFF gate for feature selection",
+    )
+    parser.add_argument(
         "--rff-scale-min",
         type=float,
         default=5.0,
@@ -262,6 +275,12 @@ def build_parser():
         help="per-layer node counts, e.g. --mlp-dims 8 32 32 => 3 layers",
     )
     parser.add_argument(
+        "--mlp-activation",
+        type=str,
+        default="relu",
+        help="activation function for mlp layer",
+    )
+    parser.add_argument(
         "--alpha-mse",
         type=float,
         default=1.0,
@@ -278,6 +297,12 @@ def build_parser():
         type=float,
         default=0.0001,
         help="target STFT-loss weight in combined loss (after warmup and ramp)",
+    )
+    parser.add_argument(
+        "--lambda-morph-consistency",
+        type=float,
+        default=0.0,
+        help="MSE weight for the morph-consistency ( a/b & -morph swapped should be equal )",
     )
     parser.add_argument(
         "--beta-stft-warmup",

@@ -2,12 +2,42 @@ import os
 
 os.environ.setdefault("TF_USE_LEGACY_KERAS", "1")
 
+import copy
 import numpy as np
 import tensorflow as tf
 from tensorflow.keras.layers import Input, Dense, Concatenate, Lambda, Layer
 from tensorflow.keras.models import Model
 from pathlib import Path
 import json
+
+
+class SparseFeatures(Layer):
+
+    def __init__(self, l1: float, **kwargs):
+        super().__init__(**kwargs)
+        self.l1 = l1
+
+    def build(self, input_shape):
+        # //2 since we want to tie the sin/cos pairs
+        self.num_features = int(input_shape[-1]) // 2  #
+        self.w = self.add_weight(
+            shape=(self.num_features,),
+            initializer="ones",
+            regularizer=tf.keras.regularizers.l1(self.l1),
+            trainable=True,
+            name="feature_weights",
+        )
+        super().build(input_shape)
+
+    def call(self, inputs):
+        # tie cos_k & sin_k ( since that's what we actually care about )
+        gate = tf.concat([self.w, self.w], axis=-1)
+        return inputs * gate
+
+    def get_config(self):
+        config = super().get_config()
+        config.update({"l1": self.l1})
+        return config
 
 
 class RandomFourierFeatures(Layer):
@@ -94,11 +124,73 @@ def create_rff_inr_model_from_config_and_latest_ckpt(run: str):
     return model
 
 
+class RffInrModel(Model):
+    """Functional RFF-INR model with an optional morph-consistency aux loss.
+
+    ( phase, a, b, morph ) should == ( phase, b, a, -morph )
+    so add a loss component that checks MSE between y_pred of these
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._lambda_morph_consistency = 0.0
+        self._morph_consistency_tracker = tf.keras.metrics.Mean(
+            name="morph_consistency"
+        )
+
+    def enable_morph_consistency(self, lambda_value: float):
+        in_d = int(self.input_shape[-1])
+        if in_d != 4:
+            raise ValueError("expected (in_d==4), got in_d={in_d}")
+        self._lambda_morph_consistency = float(lambda_value)
+
+    @staticmethod
+    def _flip_ab_morph(x):
+        # [phase, a_cv, b_cv, morph] -> [phase, b_cv, a_cv, -morph]
+        phase = x[..., 0:1]
+        a_cv = x[..., 1:2]
+        b_cv = x[..., 2:3]
+        morph = x[..., 3:4]
+        return tf.concat([phase, b_cv, a_cv, -morph], axis=-1)
+
+    def _morph_consistency(self, x, y_pred, training):
+        if self._lambda_morph_consistency <= 0.0:
+            return tf.constant(0.0, dtype=y_pred.dtype)
+        y_pred_flip = self(self._flip_ab_morph(x), training=training)
+        return tf.reduce_mean(tf.square(y_pred - y_pred_flip))
+
+    def train_step(self, data):
+        x, y, sample_weight = tf.keras.utils.unpack_x_y_sample_weight(data)
+        with tf.GradientTape() as tape:
+            y_pred = self(x, training=True)
+            loss = self.compiled_loss(
+                y, y_pred, sample_weight, regularization_losses=self.losses
+            )
+            consistency = self._morph_consistency(x, y_pred, training=True)
+            loss = loss + self._lambda_morph_consistency * consistency
+        grads = tape.gradient(loss, self.trainable_variables)
+        self.optimizer.apply_gradients(zip(grads, self.trainable_variables))
+        self.compiled_metrics.update_state(y, y_pred, sample_weight)
+        self._morph_consistency_tracker.update_state(consistency)
+        return {m.name: m.result() for m in self.metrics}
+
+    def test_step(self, data):
+        x, y, sample_weight = tf.keras.utils.unpack_x_y_sample_weight(data)
+        y_pred = self(x, training=False)
+        self.compiled_loss(y, y_pred, sample_weight, regularization_losses=self.losses)
+        consistency = self._morph_consistency(x, y_pred, training=False)
+        self.compiled_metrics.update_state(y, y_pred, sample_weight)
+        self._morph_consistency_tracker.update_state(consistency)
+        return {m.name: m.result() for m in self.metrics}
+
+
 def create_rff_inr_model(
     in_d: int,
     rff: dict,
     mlp_dims: list[int],
+    mlp_activation: str,
     out_d: int,
+    rff_l1: float = 0.0,
 ):
     # creates an implicit neural representation (INR) model:
     #   map the phase angle through fixed Random Fourier
@@ -113,7 +205,7 @@ def create_rff_inr_model(
     phase = Lambda(lambda t: t[..., 0:1], name="phase")(inp)
     embed = Lambda(lambda t: t[..., 1:in_d], name="embed")(inp)
 
-    rff = RandomFourierFeatures(
+    rff_t = RandomFourierFeatures(
         num_features=rff["num_features"],
         scale_min=rff["scale_min"],
         scale_max=rff["scale_max"],
@@ -121,10 +213,81 @@ def create_rff_inr_model(
         name="rff",
     )(phase)
 
-    h = Concatenate(name="rff_embed")([rff, embed])
+    # optional per-frequency L1 gate for feature (frequency) selection; folded
+    # away by prune_rff_by_l1 before deployment, so training-only.
+    if rff_l1 > 0.0:
+        rff_t = SparseFeatures(l1=rff_l1, name="rff_gate")(rff_t)
+
+    h = Concatenate(name="rff_embed")([rff_t, embed])
     for i, mlp_dim in enumerate(mlp_dims):
-        h = Dense(mlp_dim, activation="relu", name=f"mlp{i}")(h)
+        h = Dense(mlp_dim, activation=mlp_activation, name=f"mlp{i}")(h)
 
     y_pred = Dense(out_d, activation=None, name="y_pred")(h)
 
-    return Model(inp, y_pred)
+    return RffInrModel(inp, y_pred)
+
+
+def prune_rff_by_l1(model, model_config: dict, keep_k: int):
+    """Select the top 'keep_k' RFF frequencies and fold into mlp0.
+
+    ranbk by effective mag |w_k| * ||mlp0 row_k||
+    ( since a small L1 can be compensated by large mlp0 weight )
+
+    Returns (pruned_model, pruned_config, selected_indices).
+    """
+    num_features = int(model_config["rff"]["num_features"])
+    if keep_k > num_features:
+        raise ValueError(f"keep_k={keep_k} exceeds num_features={num_features}")
+
+    try:
+        gate = model.get_layer("rff_gate").w.numpy()  # (nf, )
+    except ValueError:
+        # source trained without an L1 gate -> plain magnitude pruning
+        gate = np.ones(num_features, dtype=np.float32)
+    old_B = model.get_layer("rff").B.numpy()  # (in_dim, nf)
+
+    # split the mlp0 kernel into two parts;
+    # 1) cos_rows & sin_rows & 2) everything else
+    # where the cos and sin rows will have the gating weights folding in
+    mlp0 = model.get_layer("mlp0")
+    kernel, bias = [w for w in mlp0.get_weights()]  # kernel (in_d, out)
+    cos_rows = kernel[:num_features]  # (nf, out)
+    sin_rows = kernel[num_features : 2 * num_features]  # (nf, out)
+    embed_rows = kernel[2 * num_features :]  # (embed_dim, out)
+
+    # use the norm of these parts of the kernal _and_ the gate amount
+    # to decide top entries. can't just use gate since there's a chance
+    # the model will learn to compensate
+    row_norm = np.sqrt((cos_rows**2).sum(axis=1) + (sin_rows**2).sum(axis=1))
+    effective_feature = gate * row_norm  # (nf,)
+    selected_idxs = np.argsort(np.abs(effective_feature))[::-1][:keep_k]
+
+    # debug
+    with np.printoptions(suppress=True):
+        print("row_norm", np.around(row_norm[selected_idxs], 3))
+        print("gate", np.around(gate[selected_idxs], 3))
+        print("effective_feature", np.around(effective_feature[selected_idxs], 3))
+
+    # clone config with updates and make new model
+    pruned_config = copy.deepcopy(model_config)
+    pruned_config["rff"]["num_features"] = int(keep_k)
+    pruned_config["rff_l1"] = 0.0  # gate folded away
+    pruned_model = create_rff_inr_model(**pruned_config)
+
+    # clobber the random init'd B with the selected frequency columns
+    pruned_model.get_layer("rff").B.assign(old_B[:, selected_idxs])
+
+    # fold the per-frequency gate into the mlp0 rff rows
+    new_cos = cos_rows[selected_idxs] * gate[selected_idxs][:, None]
+    new_sin = sin_rows[selected_idxs] * gate[selected_idxs][:, None]
+    new_kernel = np.concatenate([new_cos, new_sin, embed_rows], axis=0)
+    pruned_model.get_layer("mlp0").set_weights([new_kernel, bias])
+
+    # copy weights for other layers directlry
+    dont_copy = {"rff", "rff_gate", "mlp0"}
+    for layer in pruned_model.layers:
+        if layer.name in dont_copy or not layer.weights:
+            continue
+        layer.set_weights(model.get_layer(layer.name).get_weights())
+
+    return pruned_model, pruned_config, selected_idxs

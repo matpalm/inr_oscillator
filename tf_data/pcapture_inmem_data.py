@@ -139,32 +139,15 @@ class ParametricCaptureStaticData(object):
     def model_data_block_to_xs_ys(
         self,
         data,
-        flip_a_b: bool = False,
     ):
         """
         Args:
             data: chunk from inr_model_data (seq_len, features)
-            flip_a_b: if true change [tri, a_cv, b_cv, morph] to [tri, b_cv, a_cv, -morph]
         """
 
-        # TODO: rather than flip 1/2 the time ( which will work in expectation ) there
-        #       is also the option to bake this in specifically as a consistency loss ?
-        #       e.g L = huber_stft(yt, f(x)) + huber_stft(yt, f(x')) + lambda.||f(x)-f(x')||
-
         f = zarr_buffer_fields("inr_model_data.z")
-
-        if flip_a_b:
-            xs = np.array(
-                data[..., [f.x_phase, f.x_a_cv, f.x_b_cv, f.x_morph_cv]],
-                copy=True,
-            )
-            xs[..., -1] *= -1
-        else:
-            xs = data[..., [f.x_phase, f.x_a_cv, f.x_b_cv, f.x_morph_cv]]
-
-        # build y
+        xs = data[..., [f.x_phase, f.x_a_cv, f.x_b_cv, f.x_morph_cv]]
         ys = data[..., f.y_true : f.y_true + 1]
-
         return xs, ys
 
     def slice_window(
@@ -172,11 +155,10 @@ class ParametricCaptureStaticData(object):
         idx: int,
         seq_from: int,
         seq_len: int,
-        flip_a_b: bool,
     ):
         seq_to = seq_from + seq_len
         data = self.inr_model_data[idx, seq_from:seq_to]
-        xs, ys = self.model_data_block_to_xs_ys(data, flip_a_b=flip_a_b)
+        xs, ys = self.model_data_block_to_xs_ys(data)
         return xs.astype(np.float32), ys.astype(np.float32)
 
     def tf_training_dataset(
@@ -185,7 +167,6 @@ class ParametricCaptureStaticData(object):
         num_batches: int,
         batch_size: int,
         emit_weights: bool,
-        rnd_flip_a_b: bool = False,
         deterministic: bool = False,
     ):
         """
@@ -198,7 +179,6 @@ class ParametricCaptureStaticData(object):
             num_batches: total number of batches generated
             batch_size: batch size
             emit_weight: if set we return _weight as 3rd tuple element
-            rnd_flip_a_b: if set then 1/2 times we flip a_cv and b_cv and set -morph_cv
             deterministic: true if we want same first set each time
         """
 
@@ -218,33 +198,25 @@ class ParametricCaptureStaticData(object):
             high=self.seq_len - IGNORE_FADE_LEN - seq_len,
             size=num_examples,
         ).astype(np.int32)
-        sampled_flip_a_b = (
-            local_rng.uniform(size=num_examples) < 0.5
-            if rnd_flip_a_b
-            else np.zeros(num_examples, dtype=np.bool_)
-        )
 
         sampled_weights = tf.convert_to_tensor(
             self.static_importance_weights.astype(np.float32)
         )
 
-        ds = tf.data.Dataset.from_tensor_slices(
-            (sampled_idxs, sampled_seq_from, sampled_flip_a_b)
-        )
+        ds = tf.data.Dataset.from_tensor_slices((sampled_idxs, sampled_seq_from))
 
-        def fetch_record(idx, seq_from, flip_a_b):
+        def fetch_record(idx, seq_from):
 
-            def lookup_py(idx_np, seq_from_np, flip_np):
+            def lookup_py(idx_np, seq_from_np):
                 return self.slice_window(
                     idx=int(idx_np),
                     seq_from=int(seq_from_np),
                     seq_len=seq_len,
-                    flip_a_b=bool(flip_np),
                 )
 
             xs, ys = tf.py_function(
                 func=lookup_py,
-                inp=[idx, seq_from, flip_a_b],
+                inp=[idx, seq_from],
                 Tout=[tf.float32, tf.float32],
             )
             xs.set_shape((seq_len, self.in_d()))
