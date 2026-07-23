@@ -5,7 +5,7 @@ os.environ.setdefault("TF_USE_LEGACY_KERAS", "1")
 import copy
 import numpy as np
 import tensorflow as tf
-from tensorflow.keras.layers import Input, Dense, Concatenate, Lambda, Layer
+from tensorflow.keras.layers import Input, Dense, Concatenate, Lambda, Layer, LeakyReLU
 from tensorflow.keras.models import Model
 from pathlib import Path
 import json
@@ -40,13 +40,63 @@ class SparseFeatures(Layer):
         return config
 
 
+def build_rff_frequency_matrix(
+    basis: str,
+    in_dim: int,
+    num_features: int,
+    scale_min: float,
+    scale_max: float,
+    seed: int,
+):
+    """
+    Args:
+        basis: gaussian sample or derived harmonic (Tancik et al. 2020).
+        id_dim: for asserting just phase
+        scale_min: min scale for gaussian sample
+        scale_max: max scale for gaussian sample
+        seed: for gaussian sample
+    """
+    if basis == "gaussian":
+        if scale_min <= 0.0 or scale_max <= 0.0:
+            raise Exception("RFF scales must be > 0")
+        if scale_min > scale_max:
+            raise Exception("rff scale_min must be <= scale_max")
+        rng = np.random.default_rng(seed=seed)
+        if scale_min == scale_max:
+            col_scales = np.full((num_features,), scale_min, dtype=np.float32)
+        else:
+            log_scales = rng.uniform(
+                low=np.log(scale_min),
+                high=np.log(scale_max),
+                size=(num_features,),
+            )
+            col_scales = np.exp(log_scales).astype(np.float32)
+        return (
+            rng.standard_normal(size=(in_dim, num_features)).astype(np.float32)
+            * col_scales[None, :]
+        )
+    elif basis == "harmonic":
+        assert in_dim == 1, "harmonic is just a range over in_dim=1"
+        # phase wrapped is [-1, 1) (width 2) over one cycle, so use
+        # B_k = k/2 so that the full integer harmonic series is for
+        # both odd and even harmonics.
+        harmonics = np.arange(1, num_features + 1, dtype=np.float32) * 0.5
+        return harmonics[None, :]
+    else:
+        raise Exception(f"unknown rff basis {basis}")
+
+
 class RandomFourierFeatures(Layer):
     """
-    Fixed Random Fourier Feature mapping (Tancik et al. 2020).
+    fixed fourier feature mapping.
 
-    Maps input v -> [cos(2*pi*v*B), sin(2*pi*v*B)] where B is a fixed
-    (non-trainable) Gaussian matrix sampled once from N(0, scale**2).
-    Output dimensionality is 2 * num_features.
+    maps phase v -> [cos(2*pi*v*B), sin(2*pi*v*B)] where B is a fixed
+    (non-trainable) frequency matrix.
+
+    B init'd either as basis='gaussian' (Tancik et al. 2020)
+    or just full set as int harmonics when basis='harmonic' ( 1 -> num_features )
+
+    output always 2 * num_features ( sin & cos )
     """
 
     def __init__(
@@ -55,6 +105,7 @@ class RandomFourierFeatures(Layer):
         scale_min: float,
         scale_max: float,
         seed: int = 0,
+        basis: str = "gaussian",
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -62,28 +113,17 @@ class RandomFourierFeatures(Layer):
         self.scale_min = scale_min
         self.scale_max = scale_max
         self.seed = seed
+        self.basis = basis
 
     def build(self, input_shape):
         in_dim = int(input_shape[-1])
-        if self.scale_min <= 0.0 or self.scale_max <= 0.0:
-            raise ValueError("RFF scales must be > 0")
-        if self.scale_min > self.scale_max:
-            raise ValueError("rff scale_min must be <= scale_max")
-
-        rng = np.random.default_rng(seed=self.seed)
-        if self.scale_min == self.scale_max:
-            col_scales = np.full((self.num_features,), self.scale_min, dtype=np.float32)
-        else:
-            log_scales = rng.uniform(
-                low=np.log(self.scale_min),
-                high=np.log(self.scale_max),
-                size=(self.num_features,),
-            )
-            col_scales = np.exp(log_scales).astype(np.float32)
-
-        b_values = (
-            rng.standard_normal(size=(in_dim, self.num_features)).astype(np.float32)
-            * col_scales[None, :]
+        b_values = build_rff_frequency_matrix(
+            basis=self.basis,
+            in_dim=in_dim,
+            num_features=self.num_features,
+            scale_min=self.scale_min,
+            scale_max=self.scale_max,
+            seed=self.seed,
         )
         b_init = tf.constant_initializer(b_values)
         self.B = self.add_weight(
@@ -106,6 +146,7 @@ class RandomFourierFeatures(Layer):
                 "scale_min": self.scale_min,
                 "scale_max": self.scale_max,
                 "seed": self.seed,
+                "basis": self.basis,
             }
         )
         return config
@@ -210,6 +251,7 @@ def create_rff_inr_model(
         scale_min=rff["scale_min"],
         scale_max=rff["scale_max"],
         seed=rff["seed"],
+        basis=rff["basis"],
         name="rff",
     )(phase)
 
@@ -220,7 +262,13 @@ def create_rff_inr_model(
 
     h = Concatenate(name="rff_embed")([rff_t, embed])
     for i, mlp_dim in enumerate(mlp_dims):
-        h = Dense(mlp_dim, activation=mlp_activation, name=f"mlp{i}")(h)
+        if mlp_activation == "leaky_relu":
+            # use 1/4, instead of 0.3, so can be a shift on device
+            print("layer", i, "leaky 0.25")
+            h = Dense(mlp_dim, activation=None, name=f"mlp{i}")(h)
+            h = LeakyReLU(alpha=0.25)(h)
+        else:
+            h = Dense(mlp_dim, activation=mlp_activation, name=f"mlp{i}")(h)
 
     y_pred = Dense(out_d, activation=None, name="y_pred")(h)
 

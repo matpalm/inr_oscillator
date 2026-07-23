@@ -96,6 +96,7 @@ def train(opts):
             "scale_min": opts.rff_scale_min,
             "scale_max": opts.rff_scale_max,
             "seed": opts.rff_seed,
+            "basis": opts.rff_basis,
         },
         "mlp_dims": opts.mlp_dims,
         "mlp_activation": opts.mlp_activation,
@@ -249,6 +250,13 @@ def build_parser():
         help="number of Random Fourier Features (output dim is 2x this)",
     )
     parser.add_argument(
+        "--rff-basis",
+        choices=["gaussian", "harmonic"],
+        default="gaussian",
+        help="frequency basis for rff. 'gaussian' => random B and"
+        " 'harmonic' => all int harmonics 1..num-fourier-features",
+    )
+    parser.add_argument(
         "--rff-l1",
         type=float,
         default=0.0,
@@ -258,13 +266,13 @@ def build_parser():
         "--rff-scale-min",
         type=float,
         default=5.0,
-        help="minimum Gaussian std (sigma) for the fixed RFF frequency matrix B",
+        help="minimum gaussian std (sigma) for the fixed RFF frequency matrix B when basis is 'guassian'",
     )
     parser.add_argument(
         "--rff-scale-max",
         type=float,
         default=5.0,
-        help="maximum Gaussian std (sigma) for the fixed RFF frequency matrix B",
+        help="maximum gaussian std (sigma) for the fixed RFF frequency matrix B when basis is 'guassian'",
     )
     parser.add_argument("--rff-seed", type=int, default=0)
     parser.add_argument(

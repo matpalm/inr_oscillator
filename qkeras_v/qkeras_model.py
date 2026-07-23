@@ -12,17 +12,19 @@ from tensorflow.keras.layers import Input, Concatenate, Lambda, Layer
 from tensorflow.keras.models import Model
 from qkeras import quantized_bits, QDense, QActivation
 
+from keras_v.model import build_rff_frequency_matrix
 
 class QRandomFourierFeatures(Layer):
     """
-    Fixed Random Fourier Feature mapping (Tancik et al. 2020), quantised.
-    https://arxiv.org/abs/2006.10739
+    fixed fourier feature mapping.
 
-    Maps input v -> [cos(2*pi*v*Bq), sin(2*pi*v*Bq)] where B is a fixed
-    (non-trainable) Gaussian matrix sampled once from N(0, scale**2) and Bq is
-    B passed through the fixed-point quantiser. The transcendental cos/sin are
-    kept in float (a LUT on hardware); the layer output is then quantised.
-    Output dimensionality is 2 * num_features.
+    maps phase v -> [cos(2*pi*v*B), sin(2*pi*v*B)] where B is a fixed
+    (non-trainable) frequency matrix.
+
+    B init'd either as basis='gaussian' (Tancik et al. 2020)
+    or just full set as int harmonics when basis='harmonic' ( 1 -> num_features )
+
+    output always 2 * num_features ( sin & cos done via LUT for hardware version
     """
 
     def __init__(
@@ -33,6 +35,7 @@ class QRandomFourierFeatures(Layer):
         b_quantizer,
         out_quantizer,
         seed: int = 0,
+        basis: str = "gaussian",
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -42,28 +45,17 @@ class QRandomFourierFeatures(Layer):
         self.b_quantizer = b_quantizer
         self.out_quantizer = out_quantizer
         self.seed = seed
+        self.basis = basis
 
     def build(self, input_shape):
         in_dim = int(input_shape[-1])
-        if self.scale_min <= 0.0 or self.scale_max <= 0.0:
-            raise ValueError("RFF scales must be > 0")
-        if self.scale_min > self.scale_max:
-            raise ValueError("rff scale_min must be <= scale_max")
-
-        rng = np.random.default_rng(seed=self.seed)
-        if self.scale_min == self.scale_max:
-            col_scales = np.full((self.num_features,), self.scale_min, dtype=np.float32)
-        else:
-            log_scales = rng.uniform(
-                low=np.log(self.scale_min),
-                high=np.log(self.scale_max),
-                size=(self.num_features,),
-            )
-            col_scales = np.exp(log_scales).astype(np.float32)
-
-        b_values = (
-            rng.standard_normal(size=(in_dim, self.num_features)).astype(np.float32)
-            * col_scales[None, :]
+        b_values = build_rff_frequency_matrix(
+            basis=self.basis,
+            in_dim=in_dim,
+            num_features=self.num_features,
+            scale_min=self.scale_min,
+            scale_max=self.scale_max,
+            seed=self.seed,
         )
         b_init = tf.constant_initializer(b_values)
         self.B = self.add_weight(
@@ -89,6 +81,7 @@ class QRandomFourierFeatures(Layer):
                 "scale_min": self.scale_min,
                 "scale_max": self.scale_max,
                 "seed": self.seed,
+                "basis": self.basis,
             }
         )
         return config
@@ -173,6 +166,7 @@ class QKerasRFFModelBuilder(object):
         self.rff_scale_min = float(rff.get("scale_min", scale))
         self.rff_scale_max = float(rff.get("scale_max", scale))
         self.rff_seed = rff["seed"]
+        self.rff_basis = rff.get("basis", "gaussian")
         self.mlp_dims = mlp_dims
         self.out_d = out_d
         self.relu_upper_bound = relu_upper_bound
@@ -197,14 +191,25 @@ class QKerasRFFModelBuilder(object):
     def io_quantiser(self):
         return quantized_bits(bits=self.io_n_word, integer=self.io_n_int, alpha=1)
 
-    # quantiser for the (fixed) RFF frequency matrix B. B ~ N(0, scale**2) so
-    # |B| routinely exceeds the weight integer range; size the integer part to
-    # cover ~4 sigma so we do not clip the sampled frequencies.
+    # quantiser for the (fixed) RFF frequency matrix B.
+    # for 'gaussian' basis B ~ N(0, scale**2) so |B| often > the weight integer
+    # range; so size the int part to cover ~4 sigma ( to avoid clipping the
+    # sampled frequencies)
+    # for 'harmonic' basis B is all integer harmonics 1..num_features, so size
+    # the int part to represent the largest harmonic exactly.
     def b_quantiser(self):
-        max_scale = max(self.rff_scale_min, self.rff_scale_max)
-        n_int_b = max(
-            self.mlp_n_int, int(math.ceil(math.log2(max(4.0 * max_scale, 1.0))))
-        )
+        if self.rff_basis == "gaussian":
+            max_scale = max(self.rff_scale_min, self.rff_scale_max)
+            n_int_b = max(
+                self.mlp_n_int, int(math.ceil(math.log2(max(4.0 * max_scale, 1.0))))
+            )
+        elif self.rff_basis == "harmonic":
+            # B_k = k/2 for k in 1..num_features, so the largest frequency is
+            # num_features/2; size the int part to hold it exactly.
+            max_b = self.rff_num_features / 2.0
+            n_int_b = max(self.mlp_n_int, int(math.ceil(math.log2(max_b + 1))))
+        else:
+            raise Exception(self.rff_basis)
         return quantized_bits(bits=n_int_b + self.mlp_n_frac, integer=n_int_b, alpha=1)
 
     # relu activation quantiser (string form consumed by QActivation)
@@ -242,6 +247,7 @@ class QKerasRFFModelBuilder(object):
             b_quantizer=rff_b_quant,
             out_quantizer=rff_io_quant,
             seed=self.rff_seed,
+            basis=self.rff_basis,
             name="rff",
         )(phase_q)
 

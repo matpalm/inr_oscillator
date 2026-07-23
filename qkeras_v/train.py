@@ -113,6 +113,7 @@ def train(opts):
             "scale_max": opts.rff_scale_max,
             "lut_size": opts.rff_lut_size,
             "seed": opts.rff_seed,
+            "basis": opts.rff_basis,
         },
         "mlp_dims": opts.mlp_dims,
         "out_d": data.out_d(),
@@ -380,6 +381,13 @@ def build_parser():
         type=int,
         default=64,
         help="number of Random Fourier Features (output dim is 2x this)",
+    )
+    parser.add_argument(
+        "--rff-basis",
+        choices=["gaussian", "harmonic"],
+        default="gaussian",
+        help="frequency basis for rff. 'gaussian' => random B and"
+        " 'harmonic' => int harmonics 1..num-fourier-features",
     )
     parser.add_argument(
         "--rff-scale-min",
