@@ -3,30 +3,30 @@ set -ex
 # run initial keras_v model with large RFF bank and rff-l1
 # use FiLM for MLP0 only
 uv run -m keras_v.train \
- --run 801_embed_concat_kv \
- --dataset-type embed2d --harsh \
+ --run 802_pcapture_concat_kv \
+ --dataset-type pcapture --capture-run 600 --keras-model 232_keras/i9 \
  --num-fourier-features 1024 --rff-basis gaussian --rff-scale-min 0.1 --rff-scale-max 5.0 --rff-l1 1e-4 \
  --mlp-dims 16 16 16 \
  --alpha-mse 0.01 --alpha-huber 1.0 \
  --beta-stft-warmup 5 --beta-stft-ramp 5 --beta-stft 0.001 \
  --base-stft-fft-size 2048 --base-stft-win-length 256 \
- --gamma-slope 0.1 --delta-dc 1e-4 \
+ --gamma-slope 0.1 --delta-dc 1e-4 --lambda-morph-consistency 0.1 \
  --epochs 20 --learning-rate 1e-3 --cosine-schedule \
- --num-train-samples 20_000 --batch-size 128
+ --num-train-samples 10_000 --batch-size 128
 
 # continue with qkeras_v; init from 160_keras_v but only take top 64 RFF entries
-export RUN=801_embed_concat_qkv
+export RUN=802_pcapture_concat_qkv
 uv run -m qkeras_v.train \
  --run $RUN \
- --dataset-type embed2d --harsh \
- --init-from-run 801_embed_concat_kv --num-fourier-features 64 --rff-lut-size 4096 \
+ --dataset-type pcapture --capture-run 600 --keras-model 232_keras/i9 \
+ --init-from-run 802_pcapture_concat_kv --num-fourier-features 64 --rff-lut-size 4096 \
  --io-fp-int 1 --io-fp-frac 15 \
  --mlp-fp-int 3 --mlp-fp-frac 13 --relu-upper-bound 8 \
  --mlp-dims 16 16 16 \
  --alpha-mse 0.01 --alpha-huber 1.0 \
  --beta-stft-warmup 2 --beta-stft-ramp 2 --beta-stft 0.001 \
  --base-stft-fft-size 2048 --base-stft-win-length 256 \
- --gamma-slope 0.1 --delta-dc 1e-4 \
+ --gamma-slope 0.1 --delta-dc 1e-4 --lambda-morph-consistency 0.1 \
  --epochs 10 --learning-rate 1e-3 --cosine-schedule  \
  --num-train-samples 10_000 --batch-size 128
 

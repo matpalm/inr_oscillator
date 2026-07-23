@@ -3,7 +3,7 @@ set -ex
 # run initial keras_v model with large RFF bank and rff-l1
 # use FiLM for MLP0 only
 uv run -m keras_v.train \
- --run 800_keras_v \
+ --run 800_embed_film_kv \
  --dataset-type embed2d --harsh \
  --num-fourier-features 1024 --rff-basis gaussian --rff-scale-min 0.1 --rff-scale-max 5.0 --rff-l1 1e-4 \
  --mlp-dims 16 16 16 --film-layers 1 \
@@ -15,11 +15,11 @@ uv run -m keras_v.train \
  --num-train-samples 20_000 --batch-size 128
 
 # continue with qkeras_v; init from 160_keras_v but only take top 64 RFF entries
-export RUN=800_qkeras_v
+export RUN=800_embed_film_qkv
 uv run -m qkeras_v.train \
  --run $RUN \
  --dataset-type embed2d --harsh \
- --init-from-run 800_keras_v --num-fourier-features 64 --rff-lut-size 4096 \
+ --init-from-run 800_embed_film_kv --num-fourier-features 64 --rff-lut-size 4096 \
  --io-fp-int 1 --io-fp-frac 15 \
  --mlp-fp-int 3 --mlp-fp-frac 13 --relu-upper-bound 8 \
  --mlp-dims 16 16 16 --film-layers 1 \
@@ -46,16 +46,3 @@ openFPGALoader -c dirtyJtag runs/$RUN/tiliqua_build/top.bit
 
 # pdm flash archive build/tiliqua_build/inr-waveshaper*.tar.gz --slot 1 --noconfirm
 
-
-# time uv run -m qkeras_v.train \
-#  --run $RUN \
-#  --dataset-type pcapture --capture-run 600 --keras-model 232_keras/i9 \
-#  --num-fourier-features 80 --rff-scale-min 0.05 --rff-scale-max 1.0 --rff-lut-size 4096 \
-#  --io-fp-int 1 --io-fp-frac 15 \
-#  --mlp-fp-int 3 --mlp-fp-frac 13 --relu-upper-bound 8 \
-#  --mlp-dims 24 24 24 \
-#  --alpha-mse 0.01 --alpha-huber 1.0 --lambda-morph-consistency 0.1 \
-#  --beta-stft-warmup 5 --beta-stft-ramp 5 --beta-stft 0.01 \
-#  --base-stft-fft-size 4096 --base-stft-win-length 1024 \
-#  --epochs 30 --learning-rate 1e-3 --cosine-schedule \
-#  --num-train-samples 50_000 --batch-size 128
