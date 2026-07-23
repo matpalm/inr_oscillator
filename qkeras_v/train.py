@@ -210,8 +210,6 @@ def train(opts):
                 pass
             latest_symlink.symlink_to(pkl_fname.name)
 
-    # TODO: bring across cosine schedule from CDCC
-
     callbacks = []
     # log beta_stft (and lr) into the logs before the TensorBoard callback
     callbacks.append(LogLrAndBetaStft(beta_stft_var=beta_stft))
@@ -254,6 +252,8 @@ def train(opts):
     )
 
     if opts.cosine_schedule:
+        # TODO: don't like how the warmup interacts with beta ramp;
+        #  something doesn't look right
         lr_warmup_epochs = opts.beta_stft_warmup + opts.beta_stft_ramp
         steps_per_epoch = max(1, opts.num_train_samples // opts.batch_size)
         total_steps = opts.epochs * steps_per_epoch

@@ -2,7 +2,7 @@ set -ex
 
 rm -rf runs/{996,997} || true
 
-export RUN=996
+export RUN=996_k_sanity
 time uv run -m keras_v.train \
  --run $RUN \
  --dataset-type pcapture --capture-run 600 --keras-model 232_keras/i9 \
@@ -14,7 +14,7 @@ time uv run -m keras_v.train \
  --epochs 20 --learning-rate 1e-3  \
  --num-train-samples 5_000 --batch-size 32
 
-export RUN=997
+export RUN=997_qk_sanity
 time uv run -m qkeras_v.train \
  --run $RUN \
  --dataset-type pcapture --capture-run 600 --keras-model 232_keras/i9 \
