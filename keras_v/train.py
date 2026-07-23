@@ -26,6 +26,9 @@ from common.callbacks import (
 
 def train(opts):
 
+    if opts.mlp_activation != "relu":
+        raise Exception("only relu supported in qkeras_v and amaranth_v")
+
     run_path = Path("runs") / opts.run
 
     tensorboard_dir = run_path / "tb"

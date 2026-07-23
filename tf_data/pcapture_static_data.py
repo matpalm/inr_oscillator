@@ -199,6 +199,9 @@ class ParametricCaptureStaticData(object):
             deterministic: true if we want same first set each time
         """
 
+        if rnd_flip_a_b:
+            raise Exception("always better to use _morph_consistency. TODO: remove")
+
         if deterministic:
             local_rng = np.random.default_rng(seed=123)
         else:
