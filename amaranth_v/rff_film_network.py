@@ -1,18 +1,20 @@
-"""Full RFF-INR network in Amaranth, mirroring the qkeras model in
-qkeras_v.qkeras_model and built from a training pickle (the pattern is
-lifted from cdcc's QbNetwork).
+"""Full RFF-INR network in Amaranth, mirroring the FiLM variant of the qkeras
+model in qkeras_v.qkeras_model (film=True) and built from a training pickle.
 
-
+Unlike the concat variant (rff_concat_network.py), the embedding is NOT
+concatenated into the main path. Instead each mlp layer is Feature-wise Linear
+Modulation (FiLM) conditioned by (gamma, beta) generated from the embedding::
 
     i.payload[0]        -> RFF LUT -> [cos_0..cos_{K-1}, sin_0..sin_{K-1}]  (io)
-    i.payload[1:in_d]   -> latched embed registers                          (io)
-                              |
-        concat(rff, embed)  ==>  mlp0 (io -> NNQ, relu)
-                                   -> mlp1 (NNQ -> NNQ, relu)
-                                   -> ...
-                                   -> y_pred (NNQ -> io, no relu) -> o
+    i.payload[1:in_d]   -> embed ---> film{i}_gamma / film{i}_beta (io -> NNQ)
+                              |                    |
+        rff ==> mlp0 (io -> NNQ, no relu) -> FiLMCombine0 [(1+g)*h + b, relu]
+                  -> mlp1 (NNQ -> NNQ) -> FiLMCombine1
+                  -> ...
+                  -> y_pred (NNQ -> io, no relu) -> o
 
-
+The mlp layers apply NO relu; the relu lives in the FiLMCombine tail after the
+affine, matching the qkeras QDense -> FiLM -> quantized_relu order.
 """
 
 import json
@@ -20,7 +22,7 @@ import pickle
 from pathlib import Path
 
 import numpy as np
-from amaranth import Module, Signal
+from amaranth import Module
 from amaranth.lib import data, stream, wiring
 from amaranth.lib.wiring import In, Out
 
@@ -28,6 +30,7 @@ from amaranth_future import fixed
 
 from . import NNQ
 from .dense_layer import QDenseLayer
+from .film import FiLMCombine
 from .rff import RandomFourierFeaturesLUT
 
 
@@ -82,41 +85,62 @@ class RffNetwork(wiring.Component):
         self.num_features = int(np.asarray(rff_w["B"]).reshape(-1).shape[0])
         assert self.num_features == model_config["rff"]["num_features"]
 
-        # first mlp consumes 2*num_features rff outputs + the embedding channels.
+        # first mlp consumes ONLY the 2*num_features rff outputs (FiLM does NOT
+        # concat the embedding into the main path).
         w0, _b0 = self.dense_weights_biases_for(self.mlp_names[0])
         self.mlp_dim = int(w0.shape[1])
-        self.embed_dim = int(w0.shape[0]) - 2 * self.num_features
-        assert (
-            self.embed_dim >= 0
-        ), f"mlp0 in_d={w0.shape[0]} < 2*num_features={2 * self.num_features}"
+        assert w0.shape[0] == 2 * self.num_features, (
+            f"film mlp0 in_d={w0.shape[0]} != 2*num_features={2 * self.num_features}"
+            " (expected no embedding concat in the film topology)"
+        )
+
+        self.mlp_idxs = [int(k[len("mlp") :]) for k in self.mlp_names]
+        self.film_layer_idxs = [
+            idx for idx in self.mlp_idxs if f"film{idx}_gamma" in qkeras_weights
+        ]
+        for idx in self.film_layer_idxs:
+            for suffix in ("gamma", "beta"):
+                name = f"film{idx}_{suffix}"
+                assert name in qkeras_weights, f"expected a {name} layer in weights"
+            # w_gamma, _bias = self.dense_weights_biases_for(f"film{idx}_gamma")
+            # w_mlp, _bias = self.dense_weights_biases_for(f"mlp{idx}")
+            # assert int(w_gamma.shape[1]) == int(
+            #     w_mlp.shape[1]
+            # ), f"film{idx} gamma out={w_gamma.shape[1]} != mlp{idx} out={w_mlp.shape[1]}"
+        w_g0, _b_g0 = self.dense_weights_biases_for(
+            f"film{self.film_layer_idxs[0]}_gamma"
+        )
+        self.embed_dim = int(w_g0.shape[0])
         self.in_d = self.embed_dim + 1  # + scalar phase
 
-        wy, _by = self.dense_weights_biases_for("y_pred")
-        self.out_d = int(wy.shape[1])
+        w_y_pred, _bias = self.dense_weights_biases_for("y_pred")
+        self.out_d = int(w_y_pred.shape[1])
 
         # extract mapping from layer id to relu bound o_O
         self.relu_upper_bound = model_config["relu_upper_bound"]
 
         print(
-            f">RffNetwork in_d={self.in_d} embed_dim={self.embed_dim}"
+            f">RffNetwork(film) in_d={self.in_d} embed_dim={self.embed_dim}"
             f" num_features={self.num_features} mlp_layers={len(self.mlp_names)}"
+            f" film_layers={self.film_layer_idxs}"
             f" mlp_dim={self.mlp_dim} out_d={self.out_d}"
             f" io_shape={self.io_shape!r} lut_size={self.lut_size}"
         )
 
-        # looks like for INR against zpo results in model ignoring in3 ( morph )
-        # sanity check these cases by printing weights mag for embed -> mlp0
-        num_rff = 2 * self.num_features
-        embed_abs_means = [
-            float(np.abs(w0[num_rff + j]).mean()) for j in range(self.embed_dim)
-        ]
-        ref = max(embed_abs_means) if embed_abs_means else 0.0
-        for j, w_abs_mean in enumerate(embed_abs_means):
-            row = w0[num_rff + j]
-            print(
-                f"  embed{j} (net in{j + 1}) |w|_mean={w_abs_mean:.5f}"
-                f" max={float(np.abs(row).max()):.5f}"
-            )
+        # sanity check the film conditioning strength per embed dim (analogous to
+        # the concat version's embed->mlp0 weight magnitudes). a near-zero row
+        # means that embed channel barely modulates the network and we're probably
+        # seeing the same collapse
+        film0 = self.film_layer_idxs[0]
+        for suffix in ("gamma", "beta"):
+            w_film, _bias = self.dense_weights_biases_for(f"film{film0}_{suffix}")
+            for j in range(self.embed_dim):
+                row = w_film[j]
+                print(
+                    f" collapse check; film{film0}_{suffix} embed{j} (net in{j + 1})"
+                    f" |w|_mean={float(np.abs(row).mean()):.5f}"
+                    f" max={float(np.abs(row).max()):.5f}"
+                )
 
         super().__init__(
             {
@@ -132,7 +156,7 @@ class RffNetwork(wiring.Component):
     def elaborate(self, platform):
         m = Module()
 
-        # ---- feature layer -------------------------------------------------
+        # feature layer
         rff = RandomFourierFeaturesLUT.from_rff(
             self.qkeras_weights["rff"]["B"],
             quant_sizes=self.quant_sizes,
@@ -141,49 +165,83 @@ class RffNetwork(wiring.Component):
         m.submodules["rff"] = rff
         num_rff = 2 * self.num_features
 
-        # ---- dense layers --------------------------------------------------
+        film_set = set(self.film_layer_idxs)
+
+        # main-path dense layers.
         mlps = []
-        for idx, name in enumerate(self.mlp_names):
-            w, b = self.dense_weights_biases_for(name)
+        for pos, (idx, name) in enumerate(zip(self.mlp_idxs, self.mlp_names)):
+            w_y_pred, b_y_pred = self.dense_weights_biases_for(name)
+            filmed = idx in film_set
             mlp = QDenseLayer(
-                w,
-                b,
-                apply_relu=True,
-                relu_upper_bound=self.relu_upper_bound,
-                in_shape=self.io_shape if idx == 0 else NNQ,
+                w_y_pred,
+                b_y_pred,
+                apply_relu=not filmed,
+                relu_upper_bound=None if filmed else self.relu_upper_bound,
+                in_shape=self.io_shape if pos == 0 else NNQ,
                 out_shape=NNQ,
             )
             m.submodules[name] = mlp
             mlps.append(mlp)
 
-        w, b = self.dense_weights_biases_for("y_pred")
+        # per-layer FiLM generators (embed -> gamma/beta) + combine
+        gammas, betas, combines = {}, {}, {}
+        for idx in self.film_layer_idxs:
+            gamma_name = f"film{idx}_gamma"
+            beta_name = f"film{idx}_beta"
+            w_gamma, b_gamma = self.dense_weights_biases_for(gamma_name)
+            w_beta, b_beta = self.dense_weights_biases_for(beta_name)
+            dim = int(w_gamma.shape[1])
+            gamma = QDenseLayer(
+                w_gamma,
+                b_gamma,
+                apply_relu=False,
+                in_shape=self.io_shape,
+                out_shape=NNQ,
+            )
+            beta = QDenseLayer(
+                w_beta, b_beta, apply_relu=False, in_shape=self.io_shape, out_shape=NNQ
+            )
+            combine = FiLMCombine(dim, relu_upper_bound=self.relu_upper_bound)
+            m.submodules[gamma_name] = gamma
+            m.submodules[beta_name] = beta
+            m.submodules[f"film{idx}_combine"] = combine
+            gammas[idx] = gamma
+            betas[idx] = beta
+            combines[idx] = combine
+
+        w_y_pred, b_y_pred = self.dense_weights_biases_for("y_pred")
         y_pred = QDenseLayer(
-            w,
-            b,
+            w_y_pred,
+            b_y_pred,
             apply_relu=False,
             in_shape=NNQ,
             out_shape=self.io_shape,
         )
         m.submodules["y_pred"] = y_pred
 
-        # ---- input split: phase -> rff, embed -> latched registers ---------
-        # the scalar phase drives the rff stream;
-        embed_reg = [
-            Signal(self.io_shape, name=f"embed_reg_{j}") for j in range(self.embed_dim)
-        ]
+        # input fork: phase -> rff, embed -> every film gamma/beta
+        # the scalar phase drives the rff stream; the embedding channels drive
+        # the film generators. join their handshakes so the sample is only
+        # accepted when EVERY consumer is ready
+        embed_consumers = list(gammas.values()) + list(betas.values())
+        all_ready = rff.i.ready
+        for c in embed_consumers:
+            all_ready = all_ready & c.i.ready
+        rff_valid = self.i.valid & all_ready
 
         m.d.comb += [
+            self.i.ready.eq(all_ready),
             rff.i.payload.eq(self.i.payload[0].as_value()),
-            rff.i.valid.eq(self.i.valid),
-            self.i.ready.eq(rff.i.ready),
+            rff.i.valid.eq(rff_valid),
         ]
-        with m.If(self.i.valid & self.i.ready):
-            # embedding channels captured on the same input handshake and held
-            # until the rff features are ready to be concatenated with them.
+        for c in embed_consumers:
+            m.d.comb += c.i.valid.eq(rff_valid)
             for j in range(self.embed_dim):
-                m.d.sync += embed_reg[j].as_value().eq(self.i.payload[1 + j].as_value())
+                m.d.comb += (
+                    c.i.payload[j].as_value().eq(self.i.payload[1 + j].as_value())
+                )
 
-        # ---- concat(rff, embed) -> mlp0 ------------------------------------
+        # rff -> mlp0 (no embed concat)
         mlp0 = mlps[0]
         m.d.comb += [
             mlp0.i.valid.eq(rff.o.valid),
@@ -191,15 +249,23 @@ class RffNetwork(wiring.Component):
         ]
         for k in range(num_rff):
             m.d.comb += mlp0.i.payload[k].as_value().eq(rff.o.payload[k])
-        for j in range(self.embed_dim):
-            m.d.comb += (
-                mlp0.i.payload[num_rff + j].as_value().eq(embed_reg[j].as_value())
-            )
 
-        # ---- mlp chain -> y_pred -> output ---------------------------------
-        for a, b in zip(mlps, mlps[1:]):
-            wiring.connect(m, a.o, b.i)
-        wiring.connect(m, mlps[-1].o, y_pred.i)
+        # chain everything. FiLM layer's output is combineI.o; a
+        # plain layer's output is mlp.o. feed each layer's output into the
+        # next layer's input, and the last into y_pred
+        prev_out = None
+        for pos, idx in enumerate(self.mlp_idxs):
+            mlp = mlps[pos]
+            if pos != 0:
+                wiring.connect(m, prev_out, mlp.i)
+            if idx in film_set:
+                wiring.connect(m, mlp.o, combines[idx].i_h)
+                wiring.connect(m, gammas[idx].o, combines[idx].i_gamma)
+                wiring.connect(m, betas[idx].o, combines[idx].i_beta)
+                prev_out = combines[idx].o
+            else:
+                prev_out = mlp.o
+        wiring.connect(m, prev_out, y_pred.i)
         wiring.connect(m, y_pred.o, wiring.flipped(self.o))
 
         return m

@@ -105,7 +105,7 @@ def train(opts):
         "mlp_activation": opts.mlp_activation,
         "out_d": data.out_d(),
         "rff_l1": opts.rff_l1,
-        "film": opts.film,
+        "film_layers": opts.film_layers,
     }
     print("model_config", model_config)
     with open(run_path / "model_config.json", "w") as f:
@@ -297,10 +297,10 @@ def build_parser():
         help="activation function for mlp layer",
     )
     parser.add_argument(
-        "--film",
-        action="store_true",
-        help="condition mlp layer on the embedding via film (gamma/beta per layer) "
-        "instead of concatenating it into the RFF input embeddings",
+        "--film-layers",
+        type=int,
+        default=0,
+        help="set the first N MLP layers to use film. if 0 then use embed concat approach",
     )
     parser.add_argument(
         "--alpha-mse",

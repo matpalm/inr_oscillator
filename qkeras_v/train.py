@@ -118,7 +118,7 @@ def train(opts):
         "mlp_dims": opts.mlp_dims,
         "out_d": data.out_d(),
         "relu_upper_bound": opts.relu_upper_bound,
-        "film": opts.film,
+        "film_layers": opts.film_layers,
     }
     print("model_config", model_config)
     with open(run_path / "model_config.json", "w") as f:
@@ -421,10 +421,11 @@ def build_parser():
         help="per-layer node counts, e.g. --mlp-dims 8 32 32 => 3 layers",
     )
     parser.add_argument(
-        "--film",
-        action="store_true",
-        help="condition the MLP on the embedding via FiLM (gamma/beta per layer) "
-        "instead of concatenating it into the RFF input",
+        "--film-layers",
+        type=int,
+        default=0,
+        help="set the first N MLP layers to use FiLM (gamma/beta conditioning on "
+        "the embedding). if 0 then concatenate the embedding into the RFF input",
     )
     parser.add_argument(
         "--alpha-mse",

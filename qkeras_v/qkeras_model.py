@@ -158,12 +158,14 @@ class QKerasRFFModelBuilder(object):
         out_d: int,
         relu_upper_bound: float,
         film: bool = False,
+        film_layers: int = 0,
     ):
         # phase -> quantised Random Fourier Features -> concat quantised 2D
         # waveform embedding -> quantised ReLU MLP -> quantised output.
         #
-        # with --film the embedding is NOT concatenated; instead it drives a
-        # FiLM (gamma, beta) modulation of every MLP layer ( see keras_v ).
+        # with FiLM the embedding is NOT concatenated; instead it drives a
+        # FiLM (gamma, beta) modulation of the first 'film_layers MLP layers
+        # ( see keras_v ).
         self.in_d = in_d
         self.rff_num_features = rff["num_features"]
         scale = rff.get("scale")
@@ -175,6 +177,7 @@ class QKerasRFFModelBuilder(object):
         self.out_d = out_d
         self.relu_upper_bound = relu_upper_bound
         self.film = film
+        self.film_layers = max(0, min(int(film_layers), len(mlp_dims)))
         self.mlp_n_int = fp_info["mlp"]["n_int"]
         self.mlp_n_frac = fp_info["mlp"]["n_frac"]
         self.mlp_n_word = self.mlp_n_int + self.mlp_n_frac
@@ -256,7 +259,7 @@ class QKerasRFFModelBuilder(object):
             name="rff",
         )(phase_q)
 
-        if self.film:
+        if self.film_layers > 0:
             # main path carries only the RFF(phase); embed_q conditions via FiLM.
             h = rff
             for i, dim in enumerate(self.mlp_dims):
@@ -266,28 +269,31 @@ class QKerasRFFModelBuilder(object):
                     bias_quantizer=self.quantiser(double_width=True),
                     name=f"mlp{i}",
                 )(h)
-                # zero-init so FiLM starts as identity
-                # gamma/beta are quantised to the mlp fixed-point format.
-                gamma = QDense(
-                    dim,
-                    kernel_quantizer=self.quantiser(),
-                    bias_quantizer=self.quantiser(double_width=True),
-                    kernel_initializer="zeros",
-                    bias_initializer="zeros",
-                    name=f"film{i}_gamma",
-                )(embed_q)
-                gamma = QActivation(self.quantiser(), name=f"film{i}_gamma_q")(gamma)
-                beta = QDense(
-                    dim,
-                    kernel_quantizer=self.quantiser(),
-                    bias_quantizer=self.quantiser(double_width=True),
-                    kernel_initializer="zeros",
-                    bias_initializer="zeros",
-                    name=f"film{i}_beta",
-                )(embed_q)
-                beta = QActivation(self.quantiser(), name=f"film{i}_beta_q")(beta)
+                if i < self.film_layers:
+                    # zero-init so FiLM starts as identity
+                    # gamma/beta are quantised to the mlp fixed-point format.
+                    gamma = QDense(
+                        dim,
+                        kernel_quantizer=self.quantiser(),
+                        bias_quantizer=self.quantiser(double_width=True),
+                        kernel_initializer="zeros",
+                        bias_initializer="zeros",
+                        name=f"film{i}_gamma",
+                    )(embed_q)
+                    gamma = QActivation(self.quantiser(), name=f"film{i}_gamma_q")(
+                        gamma
+                    )
+                    beta = QDense(
+                        dim,
+                        kernel_quantizer=self.quantiser(),
+                        bias_quantizer=self.quantiser(double_width=True),
+                        kernel_initializer="zeros",
+                        bias_initializer="zeros",
+                        name=f"film{i}_beta",
+                    )(embed_q)
+                    beta = QActivation(self.quantiser(), name=f"film{i}_beta_q")(beta)
 
-                h = FiLM(name=f"film{i}")([h, gamma, beta])
+                    h = FiLM(name=f"film{i}")([h, gamma, beta])
 
                 h = QActivation(self.quant_relu(), name=f"qrelu{i}")(h)
         else:

@@ -28,7 +28,7 @@ from amaranth.sim import Simulator
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from amaranth_v.rff import RandomFourierFeaturesLUT
-from amaranth_v.rff_network import load_weights_and_config
+from amaranth_v.rff_concat_network import load_weights_and_config
 from qkeras_v.rff_lut import (
     build_io_luts,
     frac_bits,

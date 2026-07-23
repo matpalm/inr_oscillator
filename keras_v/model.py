@@ -255,17 +255,34 @@ def create_rff_inr_model(
     mlp_activation: str,
     out_d: int,
     rff_l1: float = 0.0,
-    film: bool = False,
+    film_layers: int = 0,
 ):
-    # creates an implicit neural representation (INR) model:
+    """creates an implicit neural representation (INR) model
     #   map the phase angle through fixed Random Fourier
     #   Features, concat the raw 2D waveform embedding, then regress the
     #   waveshaped output with a standard ReLU MLP.
     #
     # input layout (last axis): [phase, embed0, embed1, ...]
     #
-    # when film=True the embedding is NOT concatenated into the main path;
-    # instead it drives a FiLM layerfor each mlp layer ( pre activation )
+    # when film-modulated the embedding is NOT concatenated into the main path;
+    # instead it drives a FiLM (gamma, beta) modulation of the first
+    # `film_layers` mlp layers ( pre activation ). film_layers=None falls back
+    # to the legacy `film` bool ( all layers when True, none when False ).
+
+    Args:
+        in_d: network input dim; likely 4
+        rff: rff config dict
+        mlp_dims: list of mlp dimensions; e.g. 4,4,4 => 3 mlp layers, each with 4 nodes
+        mlp_activation: activation function to use for mlps. leaky_relu => leaky(0.25)
+        out_d: network output size; likely 1
+        rff_l1: if set, l1 to apply to rff.B ( for later pruning )
+        film_layers: apply film to first N layers. if 0 => no film and use concat approach
+
+    """
+
+    if film_layers is None:
+        film_layers = 0
+    film_layers = max(0, min(int(film_layers), len(mlp_dims)))
 
     inp = Input((None, in_d))
 
@@ -282,13 +299,14 @@ def create_rff_inr_model(
         name="rff",
     )(phase)
 
-    # optional per-frequency L1 gate for feature (frequency) selection; folded
-    # away by prune_rff_by_l1 before deployment, so training-only.
+    # optional per-frequency L1 gate for feature (frequency) selection;
+    # folded away into MLP by prune_rff_by_l1 before deployment, so training-only.
     if rff_l1 > 0.0:
         rff_t = SparseFeatures(l1=rff_l1, name="rff_gate")(rff_t)
 
-    if film:
-        # main path carries only the RFF(phase); embed conditions via film.
+    if film_layers > 0:
+        # main path carries only the RFF(phase); the first 'film_layers' mlp
+        # layers are conditioned by the embedding via FiLM, the rest are plain.
         h = rff_t
         for i, mlp_dim in enumerate(mlp_dims):
 
@@ -296,26 +314,27 @@ def create_rff_inr_model(
             # and, if required gamma and beta can be done at a lower rate
 
             h = Dense(mlp_dim, activation=None, name=f"mlp{i}")(h)
-            # zero-init so FiLM starts as identity
-            gamma = Dense(
-                mlp_dim,
-                activation=None,
-                kernel_initializer="zeros",
-                bias_initializer="zeros",
-                name=f"film{i}_gamma",
-            )(embed)
-            beta = Dense(
-                mlp_dim,
-                activation=None,
-                kernel_initializer="zeros",
-                bias_initializer="zeros",
-                name=f"film{i}_beta",
-            )(embed)
+            if i < film_layers:
+                # zero-init so FiLM starts as identity
+                gamma = Dense(
+                    mlp_dim,
+                    activation=None,
+                    kernel_initializer="zeros",
+                    bias_initializer="zeros",
+                    name=f"film{i}_gamma",
+                )(embed)
+                beta = Dense(
+                    mlp_dim,
+                    activation=None,
+                    kernel_initializer="zeros",
+                    bias_initializer="zeros",
+                    name=f"film{i}_beta",
+                )(embed)
 
-            h = FiLM(name=f"film{i}")([h, gamma, beta])
+                h = FiLM(name=f"film{i}")([h, gamma, beta])
 
             if mlp_activation == "leaky_relu":
-                print("layer", i, "leaky 0.25 (film)")
+                print("layer", i, "leaky 0.25", "(film)" if i < film_layers else "")
                 h = LeakyReLU(alpha=0.25)(h)
             else:
                 h = Activation(mlp_activation, name=f"act{i}")(h)
