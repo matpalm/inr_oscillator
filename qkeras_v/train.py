@@ -151,8 +151,8 @@ def train(opts):
 
     # optionally initialise B (top --num-fourier-features frequencies) and all
     # mlp weights from a prior float keras_v run, using the prune_rff_by_l1
-    # selection + gate-fold. This picks the best frequencies from an
-    # overcomplete, L1-gated float model to seed the (small) qkeras model.
+    # selection + gate-fold. this picks the best frequencies from an
+    # L1-gated (large) keras float model to seed the (small) qkeras fixed point model.
     if opts.init_from_run is not None:
         if opts.init_weights is not None:
             raise Exception("either --init-weights or --init-from-run but not both")
@@ -241,15 +241,19 @@ def train(opts):
     else:
         stft_hop_sizes = halving_triple(opts.base_stft_hop_size)
 
-    combined_loss_fn, mse_metric, huber_metric, stft_metric = combined_loss_terms(
-        alpha_mse=opts.alpha_mse,
-        alpha_huber=opts.alpha_huber,
-        beta_stft=beta_stft,
-        reduce_mean=False,
-        seq_len=train_seq_len,
-        stft_fft_sizes=halving_triple(opts.base_stft_fft_size),
-        stft_win_lengths=halving_triple(opts.base_stft_win_length),
-        stft_hop_sizes=stft_hop_sizes,
+    combined_loss_fn, mse_metric, huber_metric, stft_metric, slope_metric, dc_metric = (
+        combined_loss_terms(
+            alpha_mse=opts.alpha_mse,
+            alpha_huber=opts.alpha_huber,
+            beta_stft=beta_stft,
+            reduce_mean=False,
+            seq_len=train_seq_len,
+            stft_fft_sizes=halving_triple(opts.base_stft_fft_size),
+            stft_win_lengths=halving_triple(opts.base_stft_win_length),
+            stft_hop_sizes=stft_hop_sizes,
+            gamma_slope=opts.gamma_slope,
+            delta_dc=opts.delta_dc,
+        )
     )
 
     if opts.cosine_schedule:
@@ -287,7 +291,7 @@ def train(opts):
     train_model.compile(
         optimiser,
         loss=combined_loss_fn,
-        metrics=[mse_metric, huber_metric, stft_metric],
+        metrics=[mse_metric, huber_metric, stft_metric, slope_metric, dc_metric],
         jit_compile=False,  # XLA problem with STFT ???
     )
 
@@ -432,6 +436,18 @@ def build_parser():
         type=float,
         default=0.0001,
         help="target STFT-loss weight in combined loss (after warmup and ramp)",
+    )
+    parser.add_argument(
+        "--gamma-slope",
+        type=float,
+        default=0.0,
+        help="weight for first-difference (slope) L1 loss",
+    )
+    parser.add_argument(
+        "--delta-dc",
+        type=float,
+        default=0.0,
+        help="weight for dc/mean-offset loss",
     )
     parser.add_argument(
         "--lambda-morph-consistency",

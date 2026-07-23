@@ -53,6 +53,42 @@ def mse(reduce_mean: bool = True):
     return loss_fn
 
 
+def slope(reduce_mean: bool = True):
+    """
+    L1 penalty for first-difference (slope) => sharpens edges that MSE smoothes over
+    """
+
+    def loss_fn(y_true, y_pred):
+        # first difference along S
+        d_true = y_true[:, 1:, :] - y_true[:, :-1, :]
+        d_pred = y_pred[:, 1:, :] - y_pred[:, :-1, :]
+        l1 = tf.abs(d_true - d_pred)
+        # average over elements of y...
+        l1 = tf.reduce_mean(l1, axis=-1)
+        # ...then per-example mean over S -> (B,)
+        l1 = tf.reduce_mean(l1, axis=-1)
+        return tf.reduce_mean(l1) if reduce_mean else l1
+
+    return loss_fn
+
+
+def dc(reduce_mean: bool = True):
+    """
+    L1 penalty on the DC/mean offset => waveshaper should stay 0 mean
+    """
+
+    def loss_fn(y_true, y_pred):
+        # per-example mean over S -> (B, out_d)
+        m_true = tf.reduce_mean(y_true, axis=1)
+        m_pred = tf.reduce_mean(y_pred, axis=1)
+        l1 = tf.abs(m_true - m_pred)
+        # average over elements of y -> (B,)
+        l1 = tf.reduce_mean(l1, axis=-1)
+        return tf.reduce_mean(l1) if reduce_mean else l1
+
+    return loss_fn
+
+
 def multires_stft_loss(
     fft_sizes=(256, 128, 64),
     hop_sizes=(64, 32, 16),
@@ -163,8 +199,10 @@ def combined_loss(
     stft_hop_sizes=(64, 32, 16),
     reduce_mean: bool = True,
     seq_len: int = None,
+    gamma_slope: float = 0.0,
+    delta_dc: float = 0.0,
 ):
-    combined_fn, _, _, _ = combined_loss_terms(
+    combined_fn = combined_loss_terms(
         alpha_mse=alpha_mse,
         alpha_huber=alpha_huber,
         beta_stft=beta_stft,
@@ -173,7 +211,9 @@ def combined_loss(
         stft_fft_sizes=stft_fft_sizes,
         stft_win_lengths=stft_win_lengths,
         stft_hop_sizes=stft_hop_sizes,
-    )
+        gamma_slope=gamma_slope,
+        delta_dc=delta_dc,
+    )[0]
     return combined_fn
 
 
@@ -184,6 +224,8 @@ def combined_loss_terms(
     stft_fft_sizes=(256, 128, 64),
     stft_win_lengths=(256, 128, 64),
     stft_hop_sizes=(64, 32, 16),
+    gamma_slope: float = 0.0,
+    delta_dc: float = 0.0,
     reduce_mean: bool = True,
     seq_len: int = None,
 ):
@@ -197,12 +239,16 @@ def combined_loss_terms(
         reduce_mean=reduce_mean,
         seq_len=seq_len,
     )
+    slope_fn = slope(reduce_mean=reduce_mean)
+    dc_fn = dc(reduce_mean=reduce_mean)
 
     @tf.function
     def loss_fn(y_true, y_pred):
         loss = alpha_mse * mse_fn(y_true, y_pred)
         loss += alpha_huber * huber_fn(y_true, y_pred)
         loss += beta_stft * stft_fn(y_true, y_pred)
+        loss += gamma_slope * slope_fn(y_true, y_pred)
+        loss += delta_dc * dc_fn(y_true, y_pred)
         return loss
 
     @tf.function
@@ -217,15 +263,27 @@ def combined_loss_terms(
     def stft_component(y_true, y_pred):
         return stft_fn(y_true, y_pred)
 
+    @tf.function
+    def slope_component(y_true, y_pred):
+        return slope_fn(y_true, y_pred)
+
+    @tf.function
+    def dc_component(y_true, y_pred):
+        return dc_fn(y_true, y_pred)
+
     # fix named metric names for tb / keras etc
     loss_fn.__name__ = "combined_loss"
     mse_component.__name__ = "mse"
     huber_component.__name__ = "huber"
     stft_component.__name__ = "stft"
+    slope_component.__name__ = "slope"
+    dc_component.__name__ = "dc"
 
     return (
         loss_fn,
         mse_component,
         huber_component,
         stft_component,
+        slope_component,
+        dc_component,
     )
