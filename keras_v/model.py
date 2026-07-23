@@ -5,10 +5,33 @@ os.environ.setdefault("TF_USE_LEGACY_KERAS", "1")
 import copy
 import numpy as np
 import tensorflow as tf
-from tensorflow.keras.layers import Input, Dense, Concatenate, Lambda, Layer, LeakyReLU
+from tensorflow.keras.layers import (
+    Input,
+    Dense,
+    Concatenate,
+    Lambda,
+    Layer,
+    LeakyReLU,
+    Activation,
+)
 from tensorflow.keras.models import Model
 from pathlib import Path
 import json
+
+
+class FiLM(Layer):
+    """feature-wise linear modulation.
+    https://arxiv.org/abs/1709.07871
+
+    per-channel affine transform y = (1 + gamma) * x + beta.
+
+    ( use (1 + gamma) parameterisation so layer starts as identity
+    since gamma/beta are zero-initd )
+    """
+
+    def call(self, inputs):
+        x, gamma, beta = inputs
+        return (1.0 + gamma) * x + beta
 
 
 class SparseFeatures(Layer):
@@ -182,7 +205,7 @@ class RffInrModel(Model):
     def enable_morph_consistency(self, lambda_value: float):
         in_d = int(self.input_shape[-1])
         if in_d != 4:
-            raise ValueError("expected (in_d==4), got in_d={in_d}")
+            raise Exception(f"expected (in_d==4), got in_d={in_d}")
         self._lambda_morph_consistency = float(lambda_value)
 
     @staticmethod
@@ -232,6 +255,7 @@ def create_rff_inr_model(
     mlp_activation: str,
     out_d: int,
     rff_l1: float = 0.0,
+    film: bool = False,
 ):
     # creates an implicit neural representation (INR) model:
     #   map the phase angle through fixed Random Fourier
@@ -239,6 +263,9 @@ def create_rff_inr_model(
     #   waveshaped output with a standard ReLU MLP.
     #
     # input layout (last axis): [phase, embed0, embed1, ...]
+    #
+    # when film=True the embedding is NOT concatenated into the main path;
+    # instead it drives a FiLM layerfor each mlp layer ( pre activation )
 
     inp = Input((None, in_d))
 
@@ -260,15 +287,48 @@ def create_rff_inr_model(
     if rff_l1 > 0.0:
         rff_t = SparseFeatures(l1=rff_l1, name="rff_gate")(rff_t)
 
-    h = Concatenate(name="rff_embed")([rff_t, embed])
-    for i, mlp_dim in enumerate(mlp_dims):
-        if mlp_activation == "leaky_relu":
-            # use 1/4, instead of 0.3, so can be a shift on device
-            print("layer", i, "leaky 0.25")
+    if film:
+        # main path carries only the RFF(phase); embed conditions via film.
+        h = rff_t
+        for i, mlp_dim in enumerate(mlp_dims):
+
+            # note; h, gamma and beta will be able to run in parallel
+            # and, if required gamma and beta can be done at a lower rate
+
             h = Dense(mlp_dim, activation=None, name=f"mlp{i}")(h)
-            h = LeakyReLU(alpha=0.25)(h)
-        else:
-            h = Dense(mlp_dim, activation=mlp_activation, name=f"mlp{i}")(h)
+            # zero-init so FiLM starts as identity
+            gamma = Dense(
+                mlp_dim,
+                activation=None,
+                kernel_initializer="zeros",
+                bias_initializer="zeros",
+                name=f"film{i}_gamma",
+            )(embed)
+            beta = Dense(
+                mlp_dim,
+                activation=None,
+                kernel_initializer="zeros",
+                bias_initializer="zeros",
+                name=f"film{i}_beta",
+            )(embed)
+
+            h = FiLM(name=f"film{i}")([h, gamma, beta])
+
+            if mlp_activation == "leaky_relu":
+                print("layer", i, "leaky 0.25 (film)")
+                h = LeakyReLU(alpha=0.25)(h)
+            else:
+                h = Activation(mlp_activation, name=f"act{i}")(h)
+    else:
+        h = Concatenate(name="rff_embed")([rff_t, embed])
+        for i, mlp_dim in enumerate(mlp_dims):
+            if mlp_activation == "leaky_relu":
+                # use 1/4, instead of 0.3, so can be a shift on device
+                print("layer", i, "leaky 0.25")
+                h = Dense(mlp_dim, activation=None, name=f"mlp{i}")(h)
+                h = LeakyReLU(alpha=0.25)(h)
+            else:
+                h = Dense(mlp_dim, activation=mlp_activation, name=f"mlp{i}")(h)
 
     y_pred = Dense(out_d, activation=None, name="y_pred")(h)
 

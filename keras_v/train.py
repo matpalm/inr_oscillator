@@ -102,6 +102,7 @@ def train(opts):
         "mlp_activation": opts.mlp_activation,
         "out_d": data.out_d(),
         "rff_l1": opts.rff_l1,
+        "film": opts.film,
     }
     print("model_config", model_config)
     with open(run_path / "model_config.json", "w") as f:
@@ -291,6 +292,12 @@ def build_parser():
         type=str,
         default="relu",
         help="activation function for mlp layer",
+    )
+    parser.add_argument(
+        "--film",
+        action="store_true",
+        help="condition mlp layer on the embedding via film (gamma/beta per layer) "
+        "instead of concatenating it into the RFF input embeddings",
     )
     parser.add_argument(
         "--alpha-mse",
