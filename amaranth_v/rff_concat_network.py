@@ -27,7 +27,7 @@ from amaranth.lib.wiring import In, Out
 from amaranth_future import fixed
 
 from . import NNQ
-from .dense_layer import QDenseLayer
+from .dense_layer import QDenseLayer, allocate_mlp_lanes
 from .rff import RandomFourierFeaturesLUT
 
 
@@ -51,16 +51,28 @@ class RffNetwork(wiring.Component):
     def build(weights_pkl: str, **kwargs):
         return RffNetwork(*load_weights_and_config(weights_pkl), **kwargs)
 
-    def __init__(self, qkeras_weights: dict, quant_sizes: dict, model_config: dict):
+    def __init__(
+        self,
+        qkeras_weights: dict,
+        quant_sizes: dict,
+        model_config: dict,
+        mlp_lane_budget: int = 20,
+    ):
         """
         Args:
             qkeras_weights    dict from the qkeras pickle (dense layers + "rff").
             quant_sizes       for other config as required
             model_config      for other config as required
+            mlp_lane_budget   total parallel MAC lanes (=DSP multipliers) to
+                              distribute across the main-path mlp layers. The
+                              non-mlp multipliers (rff, y_pred, codec cal) sit
+                              outside this budget; keep the total under the 28
+                              MULT18X18D on the ECP5.
         """
 
         self.qkeras_weights = qkeras_weights
         self.quant_sizes = quant_sizes
+        self.mlp_lane_budget = mlp_lane_budget
 
         # dense layers in order: every "mlp{idx}" then the "y_pred" regressor.
         self.mlp_names = sorted(
@@ -142,6 +154,16 @@ class RffNetwork(wiring.Component):
         num_rff = 2 * self.num_features
 
         # ---- dense layers --------------------------------------------------
+        # spread the MAC-lane budget across every main-path mlp layer, ranked by
+        # cycle cost (mlp0's in_d = 2*num_features + embed_dim dominates, but the
+        # later relu layers co-dominate once mlp0 is parallel).
+        mlp_dims = []
+        for idx, name in enumerate(self.mlp_names):
+            w, _b = self.dense_weights_biases_for(name)
+            mlp_dims.append((int(w.shape[0]), int(w.shape[1])))
+        mlp_lanes = allocate_mlp_lanes(mlp_dims, self.mlp_lane_budget)
+        print(f">RffNetwork mlp lane allocation {list(zip(self.mlp_names, mlp_lanes))}")
+
         mlps = []
         for idx, name in enumerate(self.mlp_names):
             w, b = self.dense_weights_biases_for(name)
@@ -152,6 +174,7 @@ class RffNetwork(wiring.Component):
                 relu_upper_bound=self.relu_upper_bound,
                 in_shape=self.io_shape if idx == 0 else NNQ,
                 out_shape=NNQ,
+                n_lanes=mlp_lanes[idx],
             )
             m.submodules[name] = mlp
             mlps.append(mlp)

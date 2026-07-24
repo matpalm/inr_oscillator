@@ -134,7 +134,7 @@ class TestDenseEquivalence(unittest.TestCase):
     rows = 64
     seed = 0
 
-    def _check(self, apply_relu, relu_upper_bound, out_shape, in_shape=NNQ):
+    def _check(self, apply_relu, relu_upper_bound, out_shape, in_shape=NNQ, n_lanes=1):
         rng = np.random.default_rng(self.seed)
         n_frac = NNQ.f_bits
         in_frac = in_shape.f_bits
@@ -164,6 +164,7 @@ class TestDenseEquivalence(unittest.TestCase):
             relu_upper_bound=relu_upper_bound,
             in_shape=in_shape,
             out_shape=out_shape,
+            n_lanes=n_lanes,
         )
         hw = simulate(dut, x_codes)
         ref = golden(
@@ -200,6 +201,28 @@ class TestDenseEquivalence(unittest.TestCase):
             relu_upper_bound=8.0,
             out_shape=NNQ,
             in_shape=fixed.SQ(2, 14),
+        )
+
+    def test_parallel_full(self):
+        # fully parallel: one MAC lane per output column (out_d == n_lanes).
+        self._check(apply_relu=True, relu_upper_bound=4.0, out_shape=NNQ, n_lanes=4)
+
+    def test_parallel_partial(self):
+        # partial parallelism: 2 lanes over out_d=4 -> 2 groups, exact divisor.
+        self._check(apply_relu=True, relu_upper_bound=4.0, out_shape=NNQ, n_lanes=2)
+
+    def test_parallel_nondivisor(self):
+        # non-divisor lane count: 3 lanes over out_d=4 -> 2 groups with a padded
+        # (discarded) column; exercises the padding / result-scatter guard.
+        self._check(apply_relu=True, relu_upper_bound=4.0, out_shape=NNQ, n_lanes=3)
+
+    def test_parallel_regression_nondivisor(self):
+        # no-relu io-narrowing regression path with a non-divisor lane count.
+        self._check(
+            apply_relu=False,
+            relu_upper_bound=None,
+            out_shape=fixed.SQ(1, 15),
+            n_lanes=3,
         )
 
 

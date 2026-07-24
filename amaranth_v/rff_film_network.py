@@ -29,7 +29,7 @@ from amaranth.lib.wiring import In, Out
 from amaranth_future import fixed
 
 from . import NNQ
-from .dense_layer import QDenseLayer
+from .dense_layer import QDenseLayer, allocate_mlp_lanes
 from .film import FiLMCombine
 from .rff import RandomFourierFeaturesLUT
 
@@ -54,16 +54,28 @@ class RffNetwork(wiring.Component):
     def build(weights_pkl: str, **kwargs):
         return RffNetwork(*load_weights_and_config(weights_pkl), **kwargs)
 
-    def __init__(self, qkeras_weights: dict, quant_sizes: dict, model_config: dict):
+    def __init__(
+        self,
+        qkeras_weights: dict,
+        quant_sizes: dict,
+        model_config: dict,
+        mlp_lane_budget: int = 20,
+    ):
         """
         Args:
             qkeras_weights    dict from the qkeras pickle (dense layers + "rff").
             quant_sizes       for other config as required
             model_config      for other config as required
+            mlp_lane_budget   total parallel MAC lanes (=DSP multipliers) to
+                              distribute across the main-path mlp layers. The
+                              non-mlp multipliers (rff, film gamma/beta, y_pred,
+                              codec cal) sit outside this budget; keep the total
+                              under the 28 MULT18X18D on the ECP5.
         """
 
         self.qkeras_weights = qkeras_weights
         self.quant_sizes = quant_sizes
+        self.mlp_lane_budget = mlp_lane_budget
 
         # dense layers in order: every "mlp{idx}" then the "y_pred" regressor.
         self.mlp_names = sorted(
@@ -168,6 +180,19 @@ class RffNetwork(wiring.Component):
         film_set = set(self.film_layer_idxs)
 
         # main-path dense layers.
+        # spread the MAC-lane budget across every main-path mlp layer, ranked by
+        # cycle cost. In the FiLM topology mlp0 (in_d = 2*num_features) leads,
+        # but once it is parallel the later relu layers co-dominate, so they
+        # share the budget too.
+        main_dims = []
+        for name in self.mlp_names:
+            w, _b = self.dense_weights_biases_for(name)
+            main_dims.append((int(w.shape[0]), int(w.shape[1])))
+        mlp_lanes = allocate_mlp_lanes(main_dims, self.mlp_lane_budget)
+        print(
+            f">RffNetwork(film) mlp lane allocation "
+            f"{list(zip(self.mlp_names, mlp_lanes))}"
+        )
         mlps = []
         for pos, (idx, name) in enumerate(zip(self.mlp_idxs, self.mlp_names)):
             w_y_pred, b_y_pred = self.dense_weights_biases_for(name)
@@ -179,6 +204,7 @@ class RffNetwork(wiring.Component):
                 relu_upper_bound=None if filmed else self.relu_upper_bound,
                 in_shape=self.io_shape if pos == 0 else NNQ,
                 out_shape=NNQ,
+                n_lanes=mlp_lanes[pos],
             )
             m.submodules[name] = mlp
             mlps.append(mlp)

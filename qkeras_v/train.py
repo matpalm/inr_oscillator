@@ -302,7 +302,7 @@ def train(opts):
     print("pre training")
     builder.mlp0_row_norms(train_model)
 
-    train_model.fit(train_ds, callbacks=callbacks, epochs=opts.epochs)  # , verbose=2)
+    train_model.fit(train_ds, callbacks=callbacks, epochs=opts.epochs, verbose=2)
 
     print("---- qkeras_v model")
     print("post training")

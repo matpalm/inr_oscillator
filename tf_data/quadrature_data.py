@@ -173,8 +173,10 @@ class Embed2DQuadratureData(object):
         if self.quantise_y:
             wave = self.y_quantiser(wave)
 
-        # wrapped phase angle scaled to [-1, 1) fed directly to the model
-        phase_wrapped = np.mod(phase / np.pi + 1.0, 2.0) - 1.0
+        # wrapped phase angle scaled for the model
+        phase_wrapped = np.mod(phase / np.pi + 1.0, 2.0) - 1.0  # +/- 1 => 10V
+        phase_wrapped = -phase_wrapped  # falling ramp: descends from +1 to -1
+        phase_wrapped /= 2  # +/- 0.5 => 5V
 
         return {
             "phase": phase_wrapped,  # (-1, 1)
