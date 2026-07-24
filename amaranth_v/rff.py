@@ -20,7 +20,7 @@ One feature is processed per clock; a stream handshake gates input/output.
 This is a verification-oriented implementation, not an area-optimised one.
 """
 
-from amaranth import Module, Signal, signed, Array, Const
+from amaranth import Module, Signal, signed, Array
 from amaranth.lib import wiring, stream, data
 from amaranth.lib.memory import Memory
 from amaranth.lib.wiring import In, Out
@@ -111,7 +111,15 @@ class RandomFourierFeaturesLUT(wiring.Component):
         q = lut_size // 4  # quarter turn: cos(x) = sin(x + pi/2)
         mask = lut_size - 1
 
-        b_rom = Array(Const(c, signed(self._b_bits)) for c in self._b_codes)
+        # store B as memory
+        b_mem = Memory(
+            shape=signed(self._b_bits),
+            depth=self._num_features,
+            init=self._b_codes,
+            attrs={"ram_style": "block"},
+        )
+        m.submodules["b_mem"] = b_mem
+        rd_b = b_mem.read_port(domain="sync")
 
         # shared memory for both sin ane cos
         # cos = trig[(idx + lut_size/4) & mask].
@@ -144,6 +152,8 @@ class RandomFourierFeaturesLUT(wiring.Component):
             rd_sin.addr.eq(0),
             rd_cos.en.eq(0),
             rd_cos.addr.eq(0),
+            rd_b.en.eq(0),
+            rd_b.addr.eq(0),
         ]
 
         with m.FSM():
@@ -152,15 +162,15 @@ class RandomFourierFeaturesLUT(wiring.Component):
                 with m.If(self.i.valid):
                     m.d.sync += phase.eq(self.i.payload)
                     m.d.sync += k.eq(0)
+                    # prefetch B[0] so it is ready in the MUL state.
+                    m.d.comb += [rd_b.en.eq(1), rd_b.addr.eq(0)]
                     m.next = "MUL"
 
             with m.State("MUL"):
                 with m.If(k == K):
                     m.next = "DONE"
                 with m.Else():
-                    # register phase * B_k so the multiply is off the
-                    # ROM-address path.
-                    m.d.sync += prod.eq(phase * b_rom[k])
+                    m.d.sync += prod.eq(phase * rd_b.data)
                     m.next = "ADDR"
 
             with m.State("ADDR"):
@@ -179,6 +189,8 @@ class RandomFourierFeaturesLUT(wiring.Component):
                 m.d.sync += sin_arr[k].eq(rd_sin.data)
                 m.d.sync += cos_arr[k].eq(rd_cos.data)
                 m.d.sync += k.eq(k + 1)
+                # prefetch B[k+1] for the next MUL
+                m.d.comb += [rd_b.en.eq(1), rd_b.addr.eq(k + 1)]
                 m.next = "MUL"
 
             with m.State("DONE"):

@@ -13,6 +13,8 @@ import argparse
 import warnings
 from pathlib import Path
 
+import numpy as np
+
 from tensorflow.keras.optimizers import AdamW
 from qkeras.utils import model_save_quantized_weights
 
@@ -296,7 +298,15 @@ def train(opts):
         jit_compile=False,  # XLA problem with STFT ???
     )
 
+    print("---- qkeras_v model")
+    print("pre training")
+    builder.mlp0_row_norms(train_model)
+
     train_model.fit(train_ds, callbacks=callbacks, epochs=opts.epochs)  # , verbose=2)
+
+    print("---- qkeras_v model")
+    print("post training")
+    builder.mlp0_row_norms(train_model)
 
 
 def build_parser():

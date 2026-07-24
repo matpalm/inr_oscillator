@@ -251,10 +251,16 @@ class QDenseLayer(wiring.Component):
             with m.State("LOAD_MUL_INPUTS"):
                 # registering mul_a and mul_b in a state before the MAC greatly
                 # helps routing / comb depth ( per cdcc RowByMatrixMultiply ).
+                #
+                # Read the head of a circular buffer and rotate it by one, rather
+                # than a wide 'input[i_idx]' multiplexer.
                 m.d.sync += [
-                    mul_a.eq(self.input[self.i_idx].as_value().as_signed()),
+                    mul_a.eq(self.input[0].as_value().as_signed()),
                     mul_b.eq(rd_w.data.as_value().as_signed()),
                 ]
+                for i in range(self.in_d - 1):
+                    m.d.sync += self.input[i].eq(self.input[i + 1])
+                m.d.sync += self.input[self.in_d - 1].eq(self.input[0])
                 m.next = "MAC"
 
             with m.State("MAC"):

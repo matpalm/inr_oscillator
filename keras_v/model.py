@@ -391,6 +391,7 @@ def prune_rff_by_l1(model, model_config: dict, keep_k: int):
 
     # debug
     with np.printoptions(suppress=True):
+        print("---- keras_v model")
         print("row_norm", np.around(row_norm[selected_idxs], 3))
         print("gate", np.around(gate[selected_idxs], 3))
         print("effective_feature", np.around(effective_feature[selected_idxs], 3))
