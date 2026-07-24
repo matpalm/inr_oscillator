@@ -417,7 +417,6 @@ if __name__ == "__main__":
             b.seek(0)
             pil_img = Image.open(b).convert("RGB").copy()
             pil_img = pil_img.resize((PLOT_W, PLOT_H))
-            pil_img.save("FFFF.png")
         plt.close(fig)
         return pil_img
 

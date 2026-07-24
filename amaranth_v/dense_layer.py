@@ -135,7 +135,6 @@ class QDenseLayer(wiring.Component):
         self.input = Array(
             Signal(in_shape, name=f"qdense_in_{i}", init=0) for i in range(self.in_d)
         )
-        self.i_idx = Signal(range(self.in_d), init=0)
 
         self.result = Array(
             Signal(out_shape, name=f"qdense_result_{j}", init=0)
@@ -199,6 +198,15 @@ class QDenseLayer(wiring.Component):
 
         w_addr = Signal(range(self.num_weights + 1), name="qdense_w_addr")
 
+        # single-multiplier MAC pipeline (3 stages: issue weight read /
+        # register operands / accumulate) so we sustain one multiply-accumulate
+        # per clock instead of alternating separate load and mac states.
+        a_reg = Signal(signed(self.in_shape.width), name="qdense_a_reg")
+        n_issued = Signal(range(self.in_d + 1), name="qdense_n_issued")
+        mac_cnt = Signal(range(self.in_d + 1), name="qdense_mac_cnt")
+        s1_valid = Signal(name="qdense_s1_valid")
+        s2_valid = Signal(name="qdense_s2_valid")
+
         m.d.comb += [
             self.i.ready.eq(0),
             self.o.valid.eq(0),
@@ -223,7 +231,6 @@ class QDenseLayer(wiring.Component):
                     for i in range(self.in_d):
                         m.d.sync += self.input[i].eq(self.i.payload[i])
                     m.d.sync += [
-                        self.i_idx.eq(0),
                         self.o_idx.eq(0),
                         w_addr.eq(0),
                     ]
@@ -238,46 +245,62 @@ class QDenseLayer(wiring.Component):
                 m.next = "LOAD_BIAS"
 
             with m.State("LOAD_BIAS"):
-                # seed accumulator with the ( double-width ) bias
-                m.d.sync += self.accumulator.eq(rd_b.data.as_value().as_signed())
-                # prep read of first weight for this column ( sequential addr )
-                m.d.comb += [
-                    rd_w.en.eq(1),
-                    rd_w.addr.eq(w_addr),
-                ]
-                m.d.sync += w_addr.eq(w_addr + 1)
-                m.next = "LOAD_MUL_INPUTS"
-
-            with m.State("LOAD_MUL_INPUTS"):
-                # registering mul_a and mul_b in a state before the MAC greatly
-                # helps routing / comb depth ( per cdcc RowByMatrixMultiply ).
-                #
-                # Read the head of a circular buffer and rotate it by one, rather
-                # than a wide 'input[i_idx]' multiplexer.
+                # seed accumulator with the ( double-width ) bias and reset the
+                # MAC pipeline; STREAM issues the first weight read itself.
                 m.d.sync += [
-                    mul_a.eq(self.input[0].as_value().as_signed()),
-                    mul_b.eq(rd_w.data.as_value().as_signed()),
+                    self.accumulator.eq(rd_b.data.as_value().as_signed()),
+                    n_issued.eq(0),
+                    mac_cnt.eq(0),
+                    s1_valid.eq(0),
+                    s2_valid.eq(0),
                 ]
-                for i in range(self.in_d - 1):
-                    m.d.sync += self.input[i].eq(self.input[i + 1])
-                m.d.sync += self.input[self.in_d - 1].eq(self.input[0])
-                m.next = "MAC"
+                m.next = "STREAM"
 
-            with m.State("MAC"):
-                m.d.sync += self.accumulator.eq(
-                    self.accumulator.as_value().as_signed()
-                    + ((mul_a * mul_b) << self.prod_shift)
-                )
-                with m.If(self.i_idx == self.in_d - 1):
-                    m.next = "CLAMP"
-                with m.Else():
-                    m.d.sync += self.i_idx.eq(self.i_idx + 1)
+            with m.State("STREAM"):
+                # Pipelined MAC: one multiply-accumulate per clock.
+                #
+                # stage 1 -- issue the next weight read, capture the matching
+                # input, and rotate the circular input buffer by one. The weight
+                # RAM has 1-cycle read latency, so its data lands in stage 2;
+                # a_reg carries the paired input forward to stay aligned. Reading
+                # the head of a rotating buffer avoids a wide input multiplexer.
+                issue = Signal(name="qdense_issue")
+                m.d.comb += issue.eq(n_issued < self.in_d)
+                with m.If(issue):
                     m.d.comb += [
                         rd_w.en.eq(1),
                         rd_w.addr.eq(w_addr),
                     ]
-                    m.d.sync += w_addr.eq(w_addr + 1)
-                    m.next = "LOAD_MUL_INPUTS"
+                    m.d.sync += [
+                        w_addr.eq(w_addr + 1),
+                        a_reg.eq(self.input[0].as_value().as_signed()),
+                        n_issued.eq(n_issued + 1),
+                    ]
+                    for i in range(self.in_d - 1):
+                        m.d.sync += self.input[i].eq(self.input[i + 1])
+                    m.d.sync += self.input[self.in_d - 1].eq(self.input[0])
+                m.d.sync += s1_valid.eq(issue)
+
+                # stage 2 -- register the multiplier operands ( registering
+                # before the MAC keeps comb depth / routing in check ).
+                with m.If(s1_valid):
+                    m.d.sync += [
+                        mul_a.eq(a_reg),
+                        mul_b.eq(rd_w.data.as_value().as_signed()),
+                    ]
+                m.d.sync += s2_valid.eq(s1_valid)
+
+                # stage 3 -- multiply-accumulate one tap per clock. After the
+                # last tap ( mac_cnt == in_d - 1 ) the accumulator is complete.
+                with m.If(s2_valid):
+                    m.d.sync += self.accumulator.eq(
+                        self.accumulator.as_value().as_signed()
+                        + ((mul_a * mul_b) << self.prod_shift)
+                    )
+                    with m.If(mac_cnt == self.in_d - 1):
+                        m.next = "CLAMP"
+                    with m.Else():
+                        m.d.sync += mac_cnt.eq(mac_cnt + 1)
 
             with m.State("CLAMP"):
                 # clamp accumulator to [lower, upper].
@@ -318,7 +341,6 @@ class QDenseLayer(wiring.Component):
                     trunc_toward_zero[frac_drop : frac_drop + out_width].as_signed()
                 )
 
-                m.d.sync += self.i_idx.eq(0)
                 with m.If(self.o_idx == self.out_d - 1):
                     m.next = "DONE"
                 with m.Else():
