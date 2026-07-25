@@ -29,7 +29,10 @@ class QuadratureVOct(wiring.Component):
     F0_HZ = A4_HZ * 2 ** ((48 - 69) / 12)  # C3 (MIDI 48), pitch at V_MIN
     OCTAVES = 2  # octaves (== volts) spanned by V_MIN -> V_MAX
     PITCH_BITS = 10  # log2 of pitch-rom resolution (2**PITCH_BITS + 1 entries)
-    AMPLITUDE = 0.99  # output magnitude ( some noisy clipping at exactly 1.0? )
+
+    # output magnitude ( some noisy clipping at exactly 1.0? )
+    # note: needs to match AMP of embed data ( and generated values from pcapture )
+    AMPLITUDE = 0.99
 
     def elaborate(self, platform):
         m = Module()

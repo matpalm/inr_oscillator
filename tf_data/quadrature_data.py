@@ -5,10 +5,20 @@ import tensorflow as tf
 
 from qkeras import quantized_bits
 
-FREQS = {"A2": 110, "A3": 220, "A4": 440, "A5": 880, "A6": 1760}
+# base everything off C3 -> C5 to easier match BSP
+A4 = 440
+FREQS = {
+    "C4": A4 * (2 ** (-9 / 12)),
+}
+FREQS["C3"] = FREQS["C4"] / 2
+FREQS["C5"] = FREQS["C4"] * 2
+print("FREQ", FREQS)
 
 IN_D = 3
 OUT_D = 1
+
+# must match QuadratureVOct
+# QUADRATURE_AMPLITUDE = 0.99
 
 
 class Waveform(Enum):
@@ -56,8 +66,8 @@ class Embed2DQuadratureData(object):
 
     @classmethod
     def add_args(cls, parser):
-        parser.add_argument("--min-note", type=str, default="A3")
-        parser.add_argument("--max-note", type=str, default="A5")
+        parser.add_argument("--min-note", type=str, default="C3")
+        parser.add_argument("--max-note", type=str, default="C5")
         parser.add_argument("--harsh", action="store_true")
         parser.add_argument("--sample-rate-khz", type=float, default=192)
 
@@ -87,6 +97,7 @@ class Embed2DQuadratureData(object):
         self.quantise_y = quantise_y
 
     def in_d(self):
+        # ( phase, e0, e1 )
         return 3
 
     def out_d(self):
@@ -174,8 +185,8 @@ class Embed2DQuadratureData(object):
             wave = self.y_quantiser(wave)
 
         # wrapped phase angle scaled for the model
+        # sawtooth from -5V to +5V
         phase_wrapped = np.mod(phase / np.pi + 1.0, 2.0) - 1.0  # +/- 1 => 10V
-        phase_wrapped = -phase_wrapped  # falling ramp: descends from +1 to -1
         phase_wrapped /= 2  # +/- 0.5 => 5V
 
         return {
@@ -333,8 +344,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
-    parser.add_argument("--min-note", type=str, default="A4")
-    parser.add_argument("--max-note", type=str, default="A4")
+    parser.add_argument("--min-note", type=str, default="C5")
+    parser.add_argument("--max-note", type=str, default="C5")
     parser.add_argument("--fp-int", type=int, default=4)
     parser.add_argument("--fp-frac", type=int, default=12)
     parser.add_argument("--starting-phase", type=float, default=0)
@@ -382,7 +393,7 @@ if __name__ == "__main__":
 
     def plot_interp(w1, w2, interp):
         data = plot_data_source.calculate_wave(
-            frequency_hz=FREQS["A4"],
+            frequency_hz=FREQS["C5"],
             seq_len=opts.seq_len,
             starting_phase=0,
             waveform1=w1,
