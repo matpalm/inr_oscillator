@@ -26,10 +26,11 @@ class RampVOct(wiring.Component):
 
     FS_HZ = 48_000  # sample rate
     A4_HZ = 440.0  # tuning reference
-    V_MIN = 5.0  # lower bound input volts -> C3
-    V_MAX = 7.0  # upper bound input volts -> C5
-    F0_HZ = A4_HZ * 2 ** ((48 - 69) / 12)  # C3 (MIDI 48), pitch at V_MIN
-    OCTAVES = 2  # octaves (== volts) spanned by V_MIN -> V_MAX
+    V_MIN = 4.0  # lower bound input volts -> C2
+    V_MAX = 8.0  # upper bound input volts -> C6
+    # F0_HZ and octave span derive from V_MIN/V_MAX.
+    F0_HZ = A4_HZ * 2 ** (((12.0 * (V_MIN - 1.0)) - 69.0) / 12.0)
+    OCTAVES = V_MAX - V_MIN
     PITCH_BITS = 10  # log2 of pitch-rom resolution (2**PITCH_BITS + 1 entries)
 
     # output sawtooth spans [-RAMP_V, +RAMP_V) volts, one ramp per cycle.
@@ -59,13 +60,14 @@ class RampVOct(wiring.Component):
         # delta = OUT_RANGE * freq / fs ( scaled ), so one full ramp takes
         # exactly fs / freq samples. The 2**V exponential is baked into the
         # constants, so no runtime multiply ( and no DSP ) is needed. Depth is
-        # PITCH_SIZE + 1 so the full-scale input (V_MAX) lands exactly on C5.
+        # PITCH_SIZE + 1 so the full-scale input (V_MAX) lands exactly on the
+        # configured top pitch.
         PITCH_SIZE = 1 << self.PITCH_BITS
 
         def _delta_code(addr):
             frac = addr / PITCH_SIZE  # 0 .. 1  (fraction of the V_MIN..V_MAX range)
-            volts_above = self.OCTAVES * frac  # 0 .. 2  (volts above V_MIN)
-            freq = self.F0_HZ * (2.0**volts_above)  # C3 * 2**(V - V_MIN)
+            volts_above = self.OCTAVES * frac  # 0 .. (V_MAX - V_MIN)
+            freq = self.F0_HZ * (2.0**volts_above)  # 1V/oct above V_MIN
             return round((OUT_RANGE * freq / self.FS_HZ) * SCALE)
 
         delta_rom = Array(
@@ -82,7 +84,8 @@ class RampVOct(wiring.Component):
         # fold the (V_MAX - V_MIN) volt window down onto PITCH_SIZE addresses.
         span_shift = round(math.log2((self.V_MAX - self.V_MIN) * SCALE / PITCH_SIZE))
         x_clipped = self.i.payload.clamp(
-            fixed.Const(self.V_MIN, NNQ), fixed.Const(self.V_MAX, NNQ)
+            fixed.Const(self.V_MIN, NNQ, clamp=True),
+            fixed.Const(self.V_MAX, NNQ, clamp=True),
         )
         x_code = Signal(unsigned(NNQ.width))
         m.d.comb += x_code.eq(x_clipped.as_value())
