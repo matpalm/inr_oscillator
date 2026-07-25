@@ -127,7 +127,9 @@ def train(opts):
 
     # log beta_stft (and lr) into the logs before the TensorBoard callback
     callbacks.append(LogLrAndBetaStft(beta_stft_var=beta_stft))
-    callbacks.append(tf.keras.callbacks.TensorBoard(log_dir=str(tensorboard_dir)))
+    callbacks.append(
+        PrintRffMlp0Weights(num_features=opts.num_fourier_features, freq=10)
+    )
     callbacks.append(
         tf.keras.callbacks.ModelCheckpoint(
             filepath=str(weights_dir / "{epoch:03d}.weights.h5"),
@@ -135,11 +137,10 @@ def train(opts):
         )
     )
     callbacks.append(CheckYPred(tb_dir=str(tensorboard_dir), dataset=validate_ds))
-    callbacks.append(
-        PrintRffMlp0Weights(num_features=opts.num_fourier_features, freq=10)
-    )
     if ramp_callback is not None:
         callbacks.append(ramp_callback)
+
+    callbacks.append(tf.keras.callbacks.TensorBoard(log_dir=str(tensorboard_dir)))
 
     def halving_triple(base):
         # o_O

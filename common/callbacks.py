@@ -173,7 +173,7 @@ class PrintRffMlp0Weights(tf.keras.callbacks.Callback):
         self.num_features = num_features
         self.freq = freq
 
-    def _print(self, epoch):
+    def _print(self, epoch, print_debug: bool):
         kernel = self.model.get_layer("mlp0").kernel.numpy()  # (in_d, mlp0_out)
         rff_rows = kernel[: 2 * self.num_features]  # (2*nf, mlp0_out)
         cos_rows = rff_rows[: self.num_features]
@@ -189,15 +189,21 @@ class PrintRffMlp0Weights(tf.keras.callbacks.Callback):
             gate = None
 
         importance = group_norm if gate is None else np.abs(gate) * group_norm
-        importance_deciles = np.percentile(importance, np.linspace(0, 100, 11))
-        print(f"importance: deciles {np.around(importance_deciles, 2)}")
+        if print_debug:
+            importance_deciles = np.percentile(importance, np.linspace(0, 100, 11))
+            print(f"importance: deciles {np.around(importance_deciles, 2)}")
 
         thresh = 0.01 * importance.max() if importance.max() > 0 else 0.0
-        num_near_zero = int((importance < thresh).sum())
-        print(
-            f"importance: num_features={self.num_features} & num_non_zero={self.num_features - num_near_zero} (where zero is 0.01 of max)"
-        )
+        num_non_zero = int((importance > thresh).sum())
+        proportion_non_zero = num_non_zero / self.num_features
+        if print_debug:
+            print(
+                f"importance: num_features={self.num_features} & num_non_zero={num_non_zero} (where zero is 0.01 of max)"
+            )
+        return proportion_non_zero
 
     def on_epoch_end(self, epoch, logs=None):
-        if epoch == 0 or (epoch + 1) % self.freq == 0:
-            self._print(epoch)
+        print_debug = epoch == 0 or (epoch + 1) % self.freq == 0
+        proportion_non_zero = self._print(epoch, print_debug)
+        if logs is not None:
+            logs["proportion_non_zero"] = proportion_non_zero
