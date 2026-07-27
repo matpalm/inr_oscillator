@@ -16,6 +16,7 @@ from amaranth_future import fixed
 
 from amaranth_v import NNQ
 
+# NOTE: not used anywhere, just using ramp directly.
 
 class QuadratureVOct(wiring.Component):
 

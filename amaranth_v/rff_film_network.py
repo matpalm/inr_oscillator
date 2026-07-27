@@ -46,11 +46,22 @@ def load_weights_and_config(weights_pkl):
     return weights, quant_sizes, model_config
 
 
+def _assert_film_weights(weights: dict):
+    for k in weights.keys():
+        if "film" in k:
+            return
+    raise ValueError(
+        "expected FiLM-conditioned weights (concat setup is no longer supported)"
+    )
+
+
 class RffNetwork(wiring.Component):
 
-    @staticmethod
-    def build(weights_pkl: str, **kwargs):
-        return RffNetwork(*load_weights_and_config(weights_pkl), **kwargs)
+    @classmethod
+    def build(cls, weights_pkl: str, **kwargs):
+        weights, quant_sizes, model_config = load_weights_and_config(weights_pkl)
+        _assert_film_weights(weights)
+        return cls(weights, quant_sizes, model_config, **kwargs)
 
     def __init__(
         self,
