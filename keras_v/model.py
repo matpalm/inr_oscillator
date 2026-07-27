@@ -8,7 +8,6 @@ import tensorflow as tf
 from tensorflow.keras.layers import (
     Input,
     Dense,
-    Concatenate,
     Lambda,
     Layer,
     LeakyReLU,
@@ -255,19 +254,17 @@ def create_rff_inr_model(
     mlp_activation: str,
     out_d: int,
     rff_l1: float = 0.0,
-    film_layers: int = 0,
+    film_layers: int = 1,
 ):
     """creates an implicit neural representation (INR) model
-    #   map the phase angle through fixed Random Fourier
-    #   Features, concat the raw 2D waveform embedding, then regress the
-    #   waveshaped output with a standard ReLU MLP.
+
+    map the phase angle through fixed Random Fourier Features, apply one film layer
+    then a standard MLP to single value waveshaped output
     #
     # input layout (last axis): [phase, embed0, embed1, ...]
     #
-    # when film-modulated the embedding is NOT concatenated into the main path;
-    # instead it drives a FiLM (gamma, beta) modulation of the first
-    # `film_layers` mlp layers ( pre activation ). film_layers=None falls back
-    # to the legacy `film` bool ( all layers when True, none when False ).
+    # the embedding drives a FiLM (gamma, beta) modulation of the first
+    # `film_layers` mlp layers (pre activation).
 
     Args:
         in_d: network input dim; likely 4
@@ -276,13 +273,16 @@ def create_rff_inr_model(
         mlp_activation: activation function to use for mlps. leaky_relu => leaky(0.25)
         out_d: network output size; likely 1
         rff_l1: if set, l1 to apply to rff.B ( for later pruning )
-        film_layers: apply film to first N layers. if 0 => no film and use concat approach
+        film_layers: apply film to first N layers; must be >= 1
 
     """
 
     if film_layers is None:
-        film_layers = 0
-    film_layers = max(0, min(int(film_layers), len(mlp_dims)))
+        raise ValueError("film_layers must be set (FiLM-only model)")
+    film_layers = int(film_layers)
+    if film_layers < 1:
+        raise ValueError("film_layers must be >= 1 (concat path removed)")
+    film_layers = min(film_layers, len(mlp_dims))
 
     inp = Input((None, in_d))
 
@@ -304,50 +304,39 @@ def create_rff_inr_model(
     if rff_l1 > 0.0:
         rff_t = SparseFeatures(l1=rff_l1, name="rff_gate")(rff_t)
 
-    if film_layers > 0:
-        # main path carries only the RFF(phase); the first 'film_layers' mlp
-        # layers are conditioned by the embedding via FiLM, the rest are plain.
-        h = rff_t
-        for i, mlp_dim in enumerate(mlp_dims):
+    # main path carries only the RFF(phase); the first 'film_layers' mlp
+    # layers are conditioned by the embedding via FiLM, the rest are plain.
+    h = rff_t
+    for i, mlp_dim in enumerate(mlp_dims):
 
-            # note; h, gamma and beta will be able to run in parallel
-            # and, if required gamma and beta can be done at a lower rate
+        # note; h, gamma and beta will be able to run in parallel
+        # and, if required gamma and beta can be done at a lower rate
 
-            h = Dense(mlp_dim, activation=None, name=f"mlp{i}")(h)
-            if i < film_layers:
-                # zero-init so FiLM starts as identity
-                gamma = Dense(
-                    mlp_dim,
-                    activation=None,
-                    kernel_initializer="zeros",
-                    bias_initializer="zeros",
-                    name=f"film{i}_gamma",
-                )(embed)
-                beta = Dense(
-                    mlp_dim,
-                    activation=None,
-                    kernel_initializer="zeros",
-                    bias_initializer="zeros",
-                    name=f"film{i}_beta",
-                )(embed)
+        h = Dense(mlp_dim, activation=None, name=f"mlp{i}")(h)
+        if i < film_layers:
+            # zero-init so FiLM starts as identity
+            gamma = Dense(
+                mlp_dim,
+                activation=None,
+                kernel_initializer="zeros",
+                bias_initializer="zeros",
+                name=f"film{i}_gamma",
+            )(embed)
+            beta = Dense(
+                mlp_dim,
+                activation=None,
+                kernel_initializer="zeros",
+                bias_initializer="zeros",
+                name=f"film{i}_beta",
+            )(embed)
 
-                h = FiLM(name=f"film{i}")([h, gamma, beta])
+            h = FiLM(name=f"film{i}")([h, gamma, beta])
 
-            if mlp_activation == "leaky_relu":
-                print("layer", i, "leaky 0.25", "(film)" if i < film_layers else "")
-                h = LeakyReLU(alpha=0.25)(h)
-            else:
-                h = Activation(mlp_activation, name=f"act{i}")(h)
-    else:
-        h = Concatenate(name="rff_embed")([rff_t, embed])
-        for i, mlp_dim in enumerate(mlp_dims):
-            if mlp_activation == "leaky_relu":
-                # use 1/4, instead of 0.3, so can be a shift on device
-                print("layer", i, "leaky 0.25")
-                h = Dense(mlp_dim, activation=None, name=f"mlp{i}")(h)
-                h = LeakyReLU(alpha=0.25)(h)
-            else:
-                h = Dense(mlp_dim, activation=mlp_activation, name=f"mlp{i}")(h)
+        if mlp_activation == "leaky_relu":
+            print("layer", i, "leaky 0.25", "(film)" if i < film_layers else "")
+            h = LeakyReLU(alpha=0.25)(h)
+        else:
+            h = Activation(mlp_activation, name=f"act{i}")(h)
 
     y_pred = Dense(out_d, activation=None, name="y_pred")(h)
 
@@ -373,14 +362,11 @@ def prune_rff_by_l1(model, model_config: dict, keep_k: int):
         gate = np.ones(num_features, dtype=np.float32)
     old_B = model.get_layer("rff").B.numpy()  # (in_dim, nf)
 
-    # split the mlp0 kernel into two parts;
-    # 1) cos_rows & sin_rows & 2) everything else
-    # where the cos and sin rows will have the gating weights folding in
+    # split mlp0 kernel into cos/sin rows (FiLM-only path has no embed rows)
     mlp0 = model.get_layer("mlp0")
     kernel, bias = [w for w in mlp0.get_weights()]  # kernel (in_d, out)
     cos_rows = kernel[:num_features]  # (nf, out)
     sin_rows = kernel[num_features : 2 * num_features]  # (nf, out)
-    embed_rows = kernel[2 * num_features :]  # (embed_dim, out)
 
     # use the norm of these parts of the kernal _and_ the gate amount
     # to decide top entries. can't just use gate since there's a chance
@@ -408,7 +394,7 @@ def prune_rff_by_l1(model, model_config: dict, keep_k: int):
     # fold the per-frequency gate into the mlp0 rff rows
     new_cos = cos_rows[selected_idxs] * gate[selected_idxs][:, None]
     new_sin = sin_rows[selected_idxs] * gate[selected_idxs][:, None]
-    new_kernel = np.concatenate([new_cos, new_sin, embed_rows], axis=0)
+    new_kernel = np.concatenate([new_cos, new_sin], axis=0)
     pruned_model.get_layer("mlp0").set_weights([new_kernel, bias])
 
     # copy weights for other layers directlry

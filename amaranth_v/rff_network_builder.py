@@ -1,30 +1,27 @@
 import pickle
 
-from amaranth_v import rff_film_network, rff_concat_network
+from amaranth_v import rff_film_network
 
 # TODO: the need for this class is clearly dumb :/
 
 
-def is_film_network(weights_pkl):
+def _assert_film_network(weights_pkl):
     with open(weights_pkl, "rb") as f:
         weights = pickle.load(f)
     for k in weights.keys():
         if "film" in k:
-            return True
-    return False
+            return
+    raise ValueError(
+        "expected FiLM-conditioned weights (concat setup is no longer supported)"
+    )
 
 
 def load_and_build_network(weights_pkl):
-    if is_film_network(weights_pkl):
-        weights, quant_sizes, model_config = rff_film_network.load_weights_and_config(
-            weights_pkl
-        )
-        return rff_film_network.RffNetwork(weights, quant_sizes, model_config)
-    else:
-        weights, quant_sizes, model_config = rff_concat_network.load_weights_and_config(
-            weights_pkl
-        )
-        return rff_concat_network.RffNetwork(weights, quant_sizes, model_config)
+    _assert_film_network(weights_pkl)
+    weights, quant_sizes, model_config = rff_film_network.load_weights_and_config(
+        weights_pkl
+    )
+    return rff_film_network.RffNetwork(weights, quant_sizes, model_config)
 
 
 # WEIGHTS_PKL = os.getenv("WEIGHTS_PKL")

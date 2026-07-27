@@ -433,9 +433,8 @@ def build_parser():
     parser.add_argument(
         "--film-layers",
         type=int,
-        default=0,
-        help="set the first N MLP layers to use FiLM (gamma/beta conditioning on "
-        "the embedding). if 0 then concatenate the embedding into the RFF input",
+        default=1,
+        help="set the first N MLP layers to use FiLM (gamma/beta conditioning on the embedding)",
     )
     parser.add_argument(
         "--alpha-mse",

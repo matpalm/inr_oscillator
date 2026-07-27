@@ -8,7 +8,7 @@ from pathlib import Path
 
 import numpy as np
 import tensorflow as tf
-from tensorflow.keras.layers import Input, Concatenate, Lambda, Layer
+from tensorflow.keras.layers import Input, Lambda, Layer
 from tensorflow.keras.models import Model
 from qkeras import quantized_bits, QDense, QActivation
 
@@ -157,15 +157,10 @@ class QKerasRFFModelBuilder(object):
         mlp_dims: list[int],
         out_d: int,
         relu_upper_bound: float,
-        film: bool = False,
-        film_layers: int = 0,
+        film_layers: int = 1,
     ):
-        # phase -> quantised Random Fourier Features -> concat quantised 2D
-        # waveform embedding -> quantised ReLU MLP -> quantised output.
-        #
-        # with FiLM the embedding is NOT concatenated; instead it drives a
-        # FiLM (gamma, beta) modulation of the first 'film_layers MLP layers
-        # ( see keras_v ).
+        # phase -> quantised Random Fourier Features -> FiLM-conditioned dense
+        # -> quantised ReLU MLP -> quantised output.
         self.in_d = in_d
         self.rff_num_features = rff["num_features"]
         scale = rff.get("scale")
@@ -176,8 +171,10 @@ class QKerasRFFModelBuilder(object):
         self.mlp_dims = mlp_dims
         self.out_d = out_d
         self.relu_upper_bound = relu_upper_bound
-        self.film = film
-        self.film_layers = max(0, min(int(film_layers), len(mlp_dims)))
+        self.film_layers = int(film_layers)
+        if self.film_layers < 1:
+            raise ValueError("film_layers must be >= 1 (concat path removed)")
+        self.film_layers = min(self.film_layers, len(mlp_dims))
         self.mlp_n_int = fp_info["mlp"]["n_int"]
         self.mlp_n_frac = fp_info["mlp"]["n_frac"]
         self.mlp_n_word = self.mlp_n_int + self.mlp_n_frac
@@ -259,53 +256,40 @@ class QKerasRFFModelBuilder(object):
             name="rff",
         )(phase_q)
 
-        if self.film_layers > 0:
-            # main path carries only the RFF(phase); embed_q conditions via FiLM.
-            h = rff
-            for i, dim in enumerate(self.mlp_dims):
-                h = QDense(
+        # main path carries only the RFF(phase); embed_q conditions via FiLM.
+        h = rff
+        for i, dim in enumerate(self.mlp_dims):
+            h = QDense(
+                dim,
+                kernel_quantizer=self.quantiser(),
+                bias_quantizer=self.quantiser(double_width=True),
+                name=f"mlp{i}",
+            )(h)
+            if i < self.film_layers:
+                # zero-init so FiLM starts as identity
+                # gamma/beta are quantised to the mlp fixed-point format.
+                gamma = QDense(
                     dim,
                     kernel_quantizer=self.quantiser(),
                     bias_quantizer=self.quantiser(double_width=True),
-                    name=f"mlp{i}",
-                )(h)
-                if i < self.film_layers:
-                    # zero-init so FiLM starts as identity
-                    # gamma/beta are quantised to the mlp fixed-point format.
-                    gamma = QDense(
-                        dim,
-                        kernel_quantizer=self.quantiser(),
-                        bias_quantizer=self.quantiser(double_width=True),
-                        kernel_initializer="zeros",
-                        bias_initializer="zeros",
-                        name=f"film{i}_gamma",
-                    )(embed_q)
-                    gamma = QActivation(self.quantiser(), name=f"film{i}_gamma_q")(
-                        gamma
-                    )
-                    beta = QDense(
-                        dim,
-                        kernel_quantizer=self.quantiser(),
-                        bias_quantizer=self.quantiser(double_width=True),
-                        kernel_initializer="zeros",
-                        bias_initializer="zeros",
-                        name=f"film{i}_beta",
-                    )(embed_q)
-                    beta = QActivation(self.quantiser(), name=f"film{i}_beta_q")(beta)
-
-                    h = FiLM(name=f"film{i}")([h, gamma, beta])
-
-                h = QActivation(self.quant_relu(), name=f"qrelu{i}")(h)
-        else:
-            h = Concatenate(name="rff_embed")([rff, embed_q])
-            for i, dim in enumerate(self.mlp_dims):
-                h = QDense(
+                    kernel_initializer="zeros",
+                    bias_initializer="zeros",
+                    name=f"film{i}_gamma",
+                )(embed_q)
+                gamma = QActivation(self.quantiser(), name=f"film{i}_gamma_q")(gamma)
+                beta = QDense(
                     dim,
                     kernel_quantizer=self.quantiser(),
                     bias_quantizer=self.quantiser(double_width=True),
-                    name=f"mlp{i}",
-                )(h)
-                h = QActivation(self.quant_relu(), name=f"qrelu{i}")(h)
+                    kernel_initializer="zeros",
+                    bias_initializer="zeros",
+                    name=f"film{i}_beta",
+                )(embed_q)
+                beta = QActivation(self.quantiser(), name=f"film{i}_beta_q")(beta)
+
+                h = FiLM(name=f"film{i}")([h, gamma, beta])
+
+            h = QActivation(self.quant_relu(), name=f"qrelu{i}")(h)
 
         y_pred = QDense(
             self.out_d,

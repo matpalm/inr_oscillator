@@ -1,9 +1,7 @@
-"""Full RFF-INR network in Amaranth, mirroring the FiLM variant of the qkeras
-model in qkeras_v.qkeras_model (film=True) and built from a training pickle.
+"""Full RFF-INR network in Amaranth, mirroring the FiLM qkeras model in
+qkeras_v.qkeras_model and built from a training pickle. first layer, and
+possibly more, use film modulation.
 
-Unlike the concat variant (rff_concat_network.py), the embedding is NOT
-concatenated into the main path. Instead each mlp layer is Feature-wise Linear
-Modulation (FiLM) conditioned by (gamma, beta) generated from the embedding::
 
     i.payload[0]        -> RFF LUT -> [cos_0..cos_{K-1}, sin_0..sin_{K-1}]  (io)
     i.payload[1:in_d]   -> embed ---> film{i}_gamma / film{i}_beta (io -> NNQ)

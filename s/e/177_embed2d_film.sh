@@ -1,9 +1,9 @@
 set -ex
 
-export RUN=177_embed2d_film0
+export RUN=177_embed2d_film
 
 # run initial keras_v model with large RFF bank and rff-l1
-# use FiLM for MLP0 only
+# FiLM-only path (no embedding concat)
 uv run -m keras_v.train \
  --run ${RUN}/kv \
  --dataset-type embed2d --harsh \
@@ -16,7 +16,7 @@ uv run -m keras_v.train \
  --epochs 20 --learning-rate 1e-3 --cosine-schedule \
  --num-train-samples 20_000 --batch-size 128
 
-# continue with qkeras_v; init from 160_keras_v but only take top 64 RFF entries
+# continue with qkeras_v; keep FiLM-only path and take top 64 RFF entries
 uv run -m qkeras_v.train \
  --run ${RUN}/qkv \
  --dataset-type embed2d --harsh \

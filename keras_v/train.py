@@ -14,6 +14,7 @@ from tensorflow.keras.optimizers import AdamW
 
 from .model import create_rff_inr_model
 from tf_data.quadrature_data import Embed2DQuadratureData
+
 # from tf_data.pcapture_static_data import ParametricCaptureStaticData
 from tf_data.pcapture_inmem_data import ParametricCaptureStaticData
 from common.losses import combined_loss_terms
@@ -23,6 +24,7 @@ from common.callbacks import (
     CheckYPred,
     PrintRffMlp0Weights,
 )
+
 
 def train(opts):
 
@@ -300,8 +302,8 @@ def build_parser():
     parser.add_argument(
         "--film-layers",
         type=int,
-        default=0,
-        help="set the first N MLP layers to use film. if 0 then use embed concat approach",
+        default=1,
+        help="set the first N MLP layers to use FiLM conditioning",
     )
     parser.add_argument(
         "--alpha-mse",
