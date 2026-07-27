@@ -93,6 +93,9 @@ def train(opts):
     else:
         raise Exception("unknown --dataset-type")
 
+    # TODO: if film caching works there no reason to fo rff_l1 since
+    # it will be baked away
+
     # make model
     model_config = {
         "in_d": data.in_d(),
@@ -271,7 +274,7 @@ def build_parser():
         "--rff-l1",
         type=float,
         default=0.0,
-        help="L1 weight on a per-frequency RFF gate for feature selection",
+        help="L1 weight on a per-frequency RFF gate for feature selection.",
     )
     parser.add_argument(
         "--rff-scale-min",

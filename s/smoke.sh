@@ -29,9 +29,7 @@ time uv run -m qkeras_v.train \
  --num-train-samples 100 --batch-size 32
 
 export WEIGHTS_PKL=$PWD/runs/$RUN/weights/qkeras/latest.pkl
-uv run -m unittest test_equivalences.test_dense_equivalence
-uv run -m unittest test_equivalences.test_rff_equivalence
-uv run -m unittest test_equivalences.test_rff_network_equivalence
+uv run -m unittest discover -s test_equivalences
 
 # rm -rf /home/mat/dev/tiliqua/gateware/build/inr_waveshaper-r3/
 # pushd ~/dev/tiliqua/gateware

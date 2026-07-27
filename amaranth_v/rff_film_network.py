@@ -29,6 +29,7 @@ from amaranth_future import fixed
 from . import NNQ
 from .dense_layer import QDenseLayer, allocate_mlp_lanes
 from .film import FiLMCombine
+from .phase_h_lut_ps import PhaseHLutPS
 from .rff import RandomFourierFeaturesLUT
 
 
@@ -58,6 +59,9 @@ class RffNetwork(wiring.Component):
         quant_sizes: dict,
         model_config: dict,
         mlp_lane_budget: int = 20,
+        index_bits: int = 13,
+        psram_base: int = 0,
+        psram_addr_width: int = 22,
     ):
         """
         Args:
@@ -69,11 +73,18 @@ class RffNetwork(wiring.Component):
                               non-mlp multipliers (rff, film gamma/beta, y_pred,
                               codec cal) sit outside this budget; keep the total
                               under the 28 MULT18X18D on the ECP5.
+            index_bits        number of phase bits enumerated by the PSRAM-backed
+                              phase->h table (default 13 => 8192 entries). mlp0's
+                              pre-activation h depends only on phase, so it is
+                              materialised once at startup into PSRAM.
+            psram_base        byte offset of the phase->h table in PSRAM.
+            psram_addr_width  external (32-bit) PSRAM wishbone address width.
         """
 
         self.qkeras_weights = qkeras_weights
         self.quant_sizes = quant_sizes
         self.mlp_lane_budget = mlp_lane_budget
+        self.index_bits = index_bits
 
         # dense layers in order: every "mlp{idx}" then the "y_pred" regressor.
         self.mlp_names = sorted(
@@ -152,10 +163,41 @@ class RffNetwork(wiring.Component):
                     f" max={float(np.abs(row).max()):.5f}"
                 )
 
+        # main-path MAC-lane allocation across every mlp layer (ranked by cycle
+        # cost). mlp0 is materialised into the PSRAM phase->h table so its lanes
+        # are only exercised during the startup build, but keep it in the
+        # allocation so the fabric DSP footprint is unchanged.
+        main_dims = []
+        for name in self.mlp_names:
+            w, _b = self.dense_weights_biases_for(name)
+            main_dims.append((int(w.shape[0]), int(w.shape[1])))
+        self.mlp_lanes = allocate_mlp_lanes(main_dims, self.mlp_lane_budget)
+
+        # PSRAM-backed phase->h table: owns rff + mlp0. h = mlp0(RFF(phase))
+        # depends only on phase, so the whole table is built once at startup.
+        rff = RandomFourierFeaturesLUT.from_rff(
+            self.qkeras_weights["rff"]["B"],
+            quant_sizes=self.quant_sizes,
+            lut_size=self.lut_size,
+        )
+        w0, b0 = self.dense_weights_biases_for(self.mlp_names[0])
+        self.phlut = PhaseHLutPS(
+            rff,
+            w0,
+            b0,
+            io_shape=self.io_shape,
+            index_bits=self.index_bits,
+            addr_width_o=psram_addr_width,
+            base=psram_base,
+        )
+        self.bus_signature = self.phlut.bus_signature
+
         super().__init__(
             {
                 "i": In(stream.Signature(data.ArrayLayout(self.io_shape, self.in_d))),
                 "o": Out(stream.Signature(data.ArrayLayout(self.io_shape, self.out_d))),
+                "bus_h": Out(self.phlut.bus_signature),
+                "ready": Out(1),
             }
         )
 
@@ -166,46 +208,40 @@ class RffNetwork(wiring.Component):
     def elaborate(self, platform):
         m = Module()
 
-        # feature layer
-        rff = RandomFourierFeaturesLUT.from_rff(
-            self.qkeras_weights["rff"]["B"],
-            quant_sizes=self.quant_sizes,
-            lut_size=self.lut_size,
-        )
-        m.submodules["rff"] = rff
-        num_rff = 2 * self.num_features
+        # PSRAM-backed phase->h table (owns rff + mlp0), replacing the rff->mlp0
+        # sub-chain. Exposes a 32-bit wishbone master (bus_h) to PSRAM and a
+        # `ready` flag that is high once the startup build has filled the table.
+        phlut = self.phlut
+        m.submodules["phlut"] = phlut
+        wiring.connect(m, phlut.bus, wiring.flipped(self.bus_h))
+        m.d.comb += self.ready.eq(phlut.ready)
 
         film_set = set(self.film_layer_idxs)
 
-        # main-path dense layers.
-        # spread the MAC-lane budget across every main-path mlp layer, ranked by
-        # cycle cost. In the FiLM topology mlp0 (in_d = 2*num_features) leads,
-        # but once it is parallel the later relu layers co-dominate, so they
-        # share the budget too.
-        main_dims = []
-        for name in self.mlp_names:
-            w, _b = self.dense_weights_biases_for(name)
-            main_dims.append((int(w.shape[0]), int(w.shape[1])))
-        mlp_lanes = allocate_mlp_lanes(main_dims, self.mlp_lane_budget)
+        # main-path dense layers mlp1.. (mlp0 lives inside phlut). Lanes were
+        # allocated across every mlp layer in __init__; reuse the same slices
+        # so the fabric DSP footprint is unchanged.
         print(
             f">RffNetwork(film) mlp lane allocation "
-            f"{list(zip(self.mlp_names, mlp_lanes))}"
+            f"{list(zip(self.mlp_names, self.mlp_lanes))}"
         )
-        mlps = []
+        mlps = {}
         for pos, (idx, name) in enumerate(zip(self.mlp_idxs, self.mlp_names)):
-            w_y_pred, b_y_pred = self.dense_weights_biases_for(name)
+            if pos == 0:
+                continue  # mlp0 is inside phlut
+            w_mlp, b_mlp = self.dense_weights_biases_for(name)
             filmed = idx in film_set
             mlp = QDenseLayer(
-                w_y_pred,
-                b_y_pred,
+                w_mlp,
+                b_mlp,
                 apply_relu=not filmed,
                 relu_upper_bound=None if filmed else self.relu_upper_bound,
-                in_shape=self.io_shape if pos == 0 else NNQ,
+                in_shape=NNQ,
                 out_shape=NNQ,
-                n_lanes=mlp_lanes[pos],
+                n_lanes=self.mlp_lanes[pos],
             )
             m.submodules[name] = mlp
-            mlps.append(mlp)
+            mlps[pos] = mlp
 
         # per-layer FiLM generators (embed -> gamma/beta) + combine
         gammas, betas, combines = {}, {}, {}
@@ -243,45 +279,43 @@ class RffNetwork(wiring.Component):
         )
         m.submodules["y_pred"] = y_pred
 
-        # input fork: phase -> rff, embed -> every film gamma/beta
-        # the scalar phase drives the rff stream; the embedding channels drive
-        # the film generators. join their handshakes so the sample is only
-        # accepted when EVERY consumer is ready
+        # input fork: phase -> phlut, embed -> every film gamma/beta.
+        # the scalar phase drives the phase->h table; the embedding channels
+        # drive the film generators. join their handshakes so a sample is only
+        # accepted when EVERY consumer is ready (phlut.i.ready stays low until
+        # the startup build has finished, stalling inference until then).
         embed_consumers = list(gammas.values()) + list(betas.values())
-        all_ready = rff.i.ready
+        all_ready = phlut.i.ready
         for c in embed_consumers:
             all_ready = all_ready & c.i.ready
-        rff_valid = self.i.valid & all_ready
+        in_valid = self.i.valid & all_ready
 
         m.d.comb += [
             self.i.ready.eq(all_ready),
-            rff.i.payload.eq(self.i.payload[0].as_value()),
-            rff.i.valid.eq(rff_valid),
+            phlut.i.payload.eq(self.i.payload[0].as_value()),
+            phlut.i.valid.eq(in_valid),
         ]
         for c in embed_consumers:
-            m.d.comb += c.i.valid.eq(rff_valid)
+            m.d.comb += c.i.valid.eq(in_valid)
             for j in range(self.embed_dim):
                 m.d.comb += (
                     c.i.payload[j].as_value().eq(self.i.payload[1 + j].as_value())
                 )
 
-        # rff -> mlp0 (no embed concat)
-        mlp0 = mlps[0]
-        m.d.comb += [
-            mlp0.i.valid.eq(rff.o.valid),
-            rff.o.ready.eq(mlp0.i.ready),
-        ]
-        for k in range(num_rff):
-            m.d.comb += mlp0.i.payload[k].as_value().eq(rff.o.payload[k])
-
-        # chain everything. FiLM layer's output is combineI.o; a
-        # plain layer's output is mlp.o. feed each layer's output into the
-        # next layer's input, and the last into y_pred
+        # chain everything. a FiLM layer's output is combineI.o; a plain
+        # layer's output is mlp.o. mlp0 lives inside phlut, so position 0's h
+        # comes from phlut.o straight into the film0 combine.
         prev_out = None
         for pos, idx in enumerate(self.mlp_idxs):
+            if pos == 0:
+                assert idx in film_set, "film topology expects mlp0 to be filmed"
+                wiring.connect(m, phlut.o, combines[idx].i_h)
+                wiring.connect(m, gammas[idx].o, combines[idx].i_gamma)
+                wiring.connect(m, betas[idx].o, combines[idx].i_beta)
+                prev_out = combines[idx].o
+                continue
             mlp = mlps[pos]
-            if pos != 0:
-                wiring.connect(m, prev_out, mlp.i)
+            wiring.connect(m, prev_out, mlp.i)
             if idx in film_set:
                 wiring.connect(m, mlp.o, combines[idx].i_h)
                 wiring.connect(m, gammas[idx].o, combines[idx].i_gamma)
