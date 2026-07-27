@@ -24,7 +24,7 @@ class RampVOct(wiring.Component):
     i: In(stream.Signature(NNQ))
     o: Out(stream.Signature(NNQ))
 
-    FS_HZ = 48_000  # sample rate
+    FS_HZ = 192_000  # sample rate  TODO! configure this with --fs-192
     A4_HZ = 440.0  # tuning reference
     V_MIN = 4.0  # lower bound input volts -> C2
     V_MAX = 8.0  # upper bound input volts -> C6

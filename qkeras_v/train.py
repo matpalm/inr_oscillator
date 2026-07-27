@@ -156,6 +156,9 @@ def train(opts):
     # mlp weights from a prior float keras_v run, using the prune_rff_by_l1
     # selection + gate-fold. this picks the best frequencies from an
     # L1-gated (large) keras float model to seed the (small) qkeras fixed point model.
+    # TODO! given the phase -> h caching works we could get rid of a lot of this, being
+    #       able pretrain keras_v and finetune with the same set for qkeras_v consistently
+    #       gives the best result anyways
     if opts.init_from_run is not None:
         if opts.init_weights is not None:
             raise Exception("either --init-weights or --init-from-run but not both")
@@ -298,15 +301,15 @@ def train(opts):
         jit_compile=False,  # XLA problem with STFT ???
     )
 
-    print("---- qkeras_v model")
-    print("pre training")
-    builder.mlp0_row_norms(train_model)
+    # print("---- qkeras_v model")
+    # print("pre training")
+    # builder.mlp0_row_norms(train_model)
 
     train_model.fit(train_ds, callbacks=callbacks, epochs=opts.epochs, verbose=2)
 
-    print("---- qkeras_v model")
-    print("post training")
-    builder.mlp0_row_norms(train_model)
+    # print("---- qkeras_v model")
+    # print("post training")
+    # builder.mlp0_row_norms(train_model)
 
 
 def build_parser():

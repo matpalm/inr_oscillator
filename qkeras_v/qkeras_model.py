@@ -303,19 +303,20 @@ class QKerasRFFModelBuilder(object):
 
         return QRffInrModel(inp, y_pred)
 
-    def mlp0_row_norms(self, model):
-        mlp0_kernel = model.get_layer("mlp0").get_weights()[0]
-        cos_rows = mlp0_kernel[: self.rff_num_features]
-        sin_rows = mlp0_kernel[self.rff_num_features : 2 * self.rff_num_features]
-        row_norm = np.sqrt((cos_rows**2).sum(axis=1) + (sin_rows**2).sum(axis=1))
-        order = np.argsort(row_norm)[::-1]
-        peak = float(row_norm.max()) if self.rff_num_features else 0.0
-        threshold = 0.01 * peak
-        n_dead = int((row_norm < threshold).sum())
-        n_not_dead = self.rff_num_features - n_dead
-        with np.printoptions(suppress=True):
-            print("mlp0 rff row_norms", np.around(row_norm[order], 3))
-            print(f"n_not_dead={n_not_dead} n_dead={n_dead} (dead = <0.01 of peak)")
+    # no longer required; just select all with qkeras_v
+    # def mlp0_row_norms(self, model):
+    #     mlp0_kernel = model.get_layer("mlp0").get_weights()[0]
+    #     cos_rows = mlp0_kernel[: self.rff_num_features]
+    #     sin_rows = mlp0_kernel[self.rff_num_features : 2 * self.rff_num_features]
+    #     row_norm = np.sqrt((cos_rows**2).sum(axis=1) + (sin_rows**2).sum(axis=1))
+    #     order = np.argsort(row_norm)[::-1]
+    #     peak = float(row_norm.max()) if self.rff_num_features else 0.0
+    #     threshold = 0.01 * peak
+    #     n_dead = int((row_norm < threshold).sum())
+    #     n_not_dead = self.rff_num_features - n_dead
+    #     with np.printoptions(suppress=True):
+    #         print("mlp0 rff row_norms", np.around(row_norm[order], 3))
+    #         print(f"n_not_dead={n_not_dead} n_dead={n_dead} (dead = <0.01 of peak)")
 
 
 def build_model_from_config_and_latest_ckpt(run: str):
