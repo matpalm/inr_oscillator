@@ -30,8 +30,7 @@ from . import NNQ
 from .dense_layer import QDenseLayer, allocate_mlp_lanes
 from .film import FiLMCombine
 from .phase_h_lut_ps import PhaseHLutPS
-from .rff import RandomFourierFeaturesLUT
-
+from qkeras_v.rff_lut import build_io_luts, frac_bits, plan_shift
 
 def load_weights_and_config(weights_pkl):
     """Load the qkeras weights pickle and the model_config.json"""
@@ -173,18 +172,30 @@ class RffNetwork(wiring.Component):
             main_dims.append((int(w.shape[0]), int(w.shape[1])))
         self.mlp_lanes = allocate_mlp_lanes(main_dims, self.mlp_lane_budget)
 
-        # PSRAM-backed phase->h table: owns rff + mlp0. h = mlp0(RFF(phase))
-        # depends only on phase, so the whole table is built once at startup.
-        rff = RandomFourierFeaturesLUT.from_rff(
-            self.qkeras_weights["rff"]["B"],
-            quant_sizes=self.quant_sizes,
-            lut_size=self.lut_size,
-        )
+        # Build quantised RFF tables/codes FOR PhaseHLutPS
+        b_bits, b_integer = quant_sizes["b_bits"], quant_sizes["b_int"]
+        io_bits, io_integer = quant_sizes["io_bits"], quant_sizes["io_int"]
+        b_f = frac_bits(b_bits, b_integer)
+        B = np.asarray(self.qkeras_weights["rff"]["B"]).reshape(-1)
+        b_codes = np.round(B * (2.0**b_f)).astype(np.int64).tolist()
+        rff_shift, _ = plan_shift(io_bits, io_integer, b_bits, b_integer, self.lut_size)
+        if rff_shift < 0:
+            raise ValueError(
+                f"lut_size={self.lut_size} too large for io_frac+b_frac="
+                f"{frac_bits(io_bits, io_integer) + b_f}"
+            )
+        _cos_lut, sin_lut = build_io_luts(self.lut_size, io_bits, io_integer)
+
+        # PSRAM-backed phase->h table: h = mlp0(RFF(phase)) depends only on
+        # phase, so the whole table is built once at startup.
         w0, b0 = self.dense_weights_biases_for(self.mlp_names[0])
         self.phlut = PhaseHLutPS(
-            rff,
-            w0,
-            b0,
+            b_codes=b_codes,
+            sin_lut=sin_lut.tolist(),
+            rff_shift=rff_shift,
+            b_bits=b_bits,
+            mlp0_kernel=w0,
+            mlp0_bias=b0,
             io_shape=self.io_shape,
             index_bits=self.index_bits,
             addr_width_o=psram_addr_width,

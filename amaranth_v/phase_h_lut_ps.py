@@ -14,17 +14,19 @@ PSRAM read.
 
 Two phases of operation (single FSM, one-way ``build -> infer`` transition):
 
-  * BUILD  : sweep every phase index ``0 .. 2**index_bits - 1``, run the owned
-             ``rff`` + ``mlp0`` pipeline, and write the ``out_d`` NNQ results to
+    * BUILD  : sweep every phase index ``0 .. 2**index_bits - 1``, run a local
+                         streaming RFF->mlp0 accumulator pipeline, and write ``out_d`` NNQ
+                         results to
              PSRAM at ``(idx << dim_bits) | dim_idx``. When the last index is
              written ``ready`` is asserted (permanently).
   * INFER  : on each input phase, derive ``idx`` from its top bits, read back the
-             ``out_d`` words and present them on ``o``. ``rff`` / ``mlp0`` are
+             ``out_d`` words and present them on ``o``. the build datapath is
              idle -- every access is a guaranteed hit.
 
-The ``i`` / ``o`` ports mirror ``rff.i`` (scalar phase, ``signed(io_bits)``) and
-``mlp0.o`` (``ArrayLayout(NNQ, out_d)``) so this is a drop-in replacement for the
-``rff -> mlp0`` sub-chain in ``rff_film_network.RffNetwork``.
+The ``i`` / ``o`` ports mirror scalar phase input (``signed(io_bits)``) and the
+cached ``h`` vector (``ArrayLayout(NNQ, out_d)``), so this is a drop-in
+replacement for the ``rff -> mlp0`` sub-chain in
+``rff_film_network.RffNetwork``.
 
 The 16-bit NNQ words are packed x2 into 32-bit PSRAM words by ``_WishboneAdapter``
 and fronted by ``WishboneL2Cache`` (both vendored in ``wishbone_cache``).
@@ -51,7 +53,10 @@ class PhaseHLutPS(wiring.Component):
 
     def __init__(
         self,
-        rff,
+        b_codes,
+        sin_lut,
+        rff_shift,
+        b_bits,
         mlp0_kernel,
         mlp0_bias,
         io_shape,
@@ -62,7 +67,10 @@ class PhaseHLutPS(wiring.Component):
     ):
         """
         Args:
-            rff           a ``RandomFourierFeaturesLUT`` (owned; phase -> features)
+            b_codes       quantised RFF basis coefficients (signed integer codes)
+            sin_lut       shared trig LUT storing sin on the io fixed-point grid
+            rff_shift     right-shift applied to phase*b to form LUT index
+            b_bits        width of quantised ``b`` coefficients
             mlp0_kernel   first dense kernel (in_d=2*num_features, out_d=mlp_dim)
             mlp0_bias     first dense bias (double-width quant in training)
             io_shape      fixed-point shape of the phase / rff features
@@ -72,14 +80,18 @@ class PhaseHLutPS(wiring.Component):
             base          byte offset of this table's region in PSRAM (4-aligned)
             cache_kwargs  extra kwargs forwarded to ``WishboneL2Cache``
         """
+
         self.io_bits = int(io_shape.width)
         self._io_frac = int(io_shape.f_bits)
         self.index_bits = int(index_bits)
-        self._rff_shift = int(rff._shift)
-        self._b_bits = int(rff._b_bits)
-        self._b_codes = [int(c) for c in rff._b_codes]
-        self._sin_lut = [int(c) for c in rff._sin_lut]
-        self._lut_size = int(rff._lut_size)
+        self._rff_shift = int(rff_shift)
+        self._b_bits = int(b_bits)
+        self._b_codes = [int(c) for c in b_codes]
+        self._sin_lut = [int(c) for c in sin_lut]
+        self._lut_size = len(self._sin_lut)
+        assert (
+            self._lut_size >= 2 and (self._lut_size & (self._lut_size - 1)) == 0
+        ), f"sin_lut size must be a power of two, got {self._lut_size}"
         self._lut_bits = (self._lut_size - 1).bit_length()
         self._quarter_turn = self._lut_size // 4
         self._lut_mask = self._lut_size - 1
@@ -247,11 +259,9 @@ class PhaseHLutPS(wiring.Component):
             for o in range(self.out_d)
         )
         phase_code = Signal(signed(self.io_bits))
-        b_code = Signal(signed(self._b_bits))
         prod = Signal(signed(self.io_bits + self._b_bits))
         feat_val = Signal(signed(self.io_bits))
         is_sin = Signal()
-        b_idx = Signal(range(self._num_features))
         m.d.comb += self.ready.eq(built)
 
         # defaults each cycle
@@ -319,19 +329,11 @@ class PhaseHLutPS(wiring.Component):
                 ]
                 m.d.sync += [
                     is_sin.eq(feat_idx >= self._num_features),
-                    b_idx.eq(
-                        Mux(
-                            feat_idx < self._num_features,
-                            feat_idx,
-                            feat_idx - self._num_features,
-                        )
-                    ),
                 ]
                 m.next = "BUILD_RFF_MUL"
 
             with m.State("BUILD_RFF_MUL"):
                 m.d.sync += [
-                    b_code.eq(rd_b.data),
                     prod.eq(phase_code * rd_b.data),
                 ]
                 m.next = "BUILD_RFF_ADDR"

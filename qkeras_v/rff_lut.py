@@ -1,9 +1,8 @@
 """Bit-exact fixed-point golden model of the RFF datapath.
 
-This module produces the *integer codes* that the hardware
-(``amaranth_v.rff.RandomFourierFeaturesLUT``) must reproduce exactly.  Both the
-golden model here and the Amaranth ROM are fed the identical LUT / B integer
-codes, so the equivalence test can assert a bit-for-bit match.
+This module produces the *integer codes* used by the hardware RFF datapath.
+Both the golden model here and gateware build path are fed the identical LUT / B
+integer codes, so equivalence tests can assert bit-for-bit behaviour.
 
 Fixed-point convention follows qkeras ``quantized_bits(bits, integer)``:
 one sign bit, ``integer`` integer bits, and ``bits - integer - 1`` fractional
