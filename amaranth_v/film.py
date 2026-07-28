@@ -7,25 +7,41 @@ gamma/beta are the (NNQ) modulation vectors produced by the
 film{i}_gamma / film{i}_beta QDense layers
 
 'post' is the same statemachine QDenseLayer uses
-clamp -> relu -> re-clip -> truncate-toward-zero tail
+clamp -> activation -> re-clip -> truncate-toward-zero tail
 narrowing the double-width accumulator back to NNQ.
 
 """
 
-from amaranth import Module, Mux, Signal, signed, Array
+from amaranth import Array, Module, Mux, Signal, signed
 from amaranth.lib import data, stream, wiring
 from amaranth.lib.wiring import In, Out
 
 from amaranth_future import fixed
 
 from . import NNQ
-
+from .siren_cordic import SirenCordic
 
 class FiLMCombine(wiring.Component):
 
-    def __init__(self, dim: int, relu_upper_bound: float):
+    def __init__(
+        self,
+        dim: int,
+        relu_upper_bound: float | None,
+        activation: str = "relu",
+        siren_omega_0: float = 30.0,
+    ):
         self.dim = dim
         self.relu_upper_bound = relu_upper_bound
+        self.activation = str(activation)
+        self.siren_omega_0 = float(siren_omega_0)
+        if self.activation not in {"relu", "siren", "none"}:
+            raise ValueError(
+                f"unsupported activation={self.activation}; expected relu/siren/none"
+            )
+        if self.activation == "relu" and self.relu_upper_bound is None:
+            raise ValueError("relu_upper_bound is required when activation='relu'")
+        if self.activation == "siren" and self.siren_omega_0 <= 0.0:
+            raise ValueError(f"siren_omega_0 must be > 0, got {self.siren_omega_0}")
 
         # products of two NNQ values live at 2*NNQ.f_bits; size the integer part
         # for the worst-case (1+gamma)*h plus a couple of hacky extra bits (?)
@@ -35,7 +51,8 @@ class FiLMCombine(wiring.Component):
         self.frac_drop = acc_f_bits - NNQ.f_bits
         self.beta_shift = NNQ.f_bits  # NNQ (2^-f) -> acc (2^-2f)
 
-        self.relu_bound = fixed.Const(relu_upper_bound, shape=self.acc_shape)
+        if self.activation == "relu":
+            self.relu_bound = fixed.Const(relu_upper_bound, shape=self.acc_shape)
         self.lower_bound = fixed.Const(
             NNQ.min().as_float(), shape=self.acc_shape, clamp=True
         ).as_value()
@@ -71,6 +88,10 @@ class FiLMCombine(wiring.Component):
         post_reclipped = Signal(
             signed(self.acc_shape.width), name="film_post_reclipped"
         )
+        trunc_reg = Signal(signed(NNQ.width), name="film_trunc_reg")
+
+        if self.activation == "siren":
+            m.submodules.siren = siren = SirenCordic(self.siren_omega_0)
 
         nnq_one = 1 << NNQ.f_bits  # representation of 1.0 for gamma add
 
@@ -83,6 +104,12 @@ class FiLMCombine(wiring.Component):
             self.i_beta.ready.eq(0),
             self.o.valid.eq(0),
         ]
+        if self.activation == "siren":
+            m.d.comb += [
+                siren.i.valid.eq(0),
+                siren.i.payload.eq(0),
+                siren.o.ready.eq(0),
+            ]
 
         frac_drop = self.frac_drop
         out_width = NNQ.width
@@ -135,12 +162,15 @@ class FiLMCombine(wiring.Component):
                 m.next = "RELU"
 
             with m.State("RELU"):
-                relu_ub = self.relu_bound.as_value()
-                post = Mux(
-                    post_clamped < 0,
-                    0,
-                    Mux(post_clamped > relu_ub, relu_ub, post_clamped),
-                )
+                if self.activation == "relu":
+                    relu_ub = self.relu_bound.as_value()
+                    post = Mux(
+                        post_clamped < 0,
+                        0,
+                        Mux(post_clamped > relu_ub, relu_ub, post_clamped),
+                    )
+                else:
+                    post = post_clamped
                 m.d.sync += post_reclipped.eq(
                     Mux(post < lower, lower, Mux(post > upper, upper, post))
                 )
@@ -154,14 +184,36 @@ class FiLMCombine(wiring.Component):
                     acc_clipped + (1 << frac_drop),
                     acc_clipped,
                 )
-                m.d.sync += result[c_idx].eq(
-                    trunc_toward_zero[frac_drop : frac_drop + out_width].as_signed()
-                )
-                with m.If(c_idx == self.dim - 1):
-                    m.next = "DONE"
-                with m.Else():
-                    m.d.sync += c_idx.eq(c_idx + 1)
-                    m.next = "LOAD_MUL_INPUTS"
+                trunc = trunc_toward_zero[frac_drop : frac_drop + out_width].as_signed()
+                if self.activation == "siren":
+                    m.d.sync += trunc_reg.eq(trunc)
+                    m.next = "SIREN_SEND"
+                else:
+                    m.d.sync += result[c_idx].eq(trunc)
+                    with m.If(c_idx == self.dim - 1):
+                        m.next = "DONE"
+                    with m.Else():
+                        m.d.sync += c_idx.eq(c_idx + 1)
+                        m.next = "LOAD_MUL_INPUTS"
+
+            if self.activation == "siren":
+                with m.State("SIREN_SEND"):
+                    m.d.comb += [
+                        siren.i.valid.eq(1),
+                        siren.i.payload.eq(trunc_reg),
+                    ]
+                    with m.If(siren.i.ready):
+                        m.next = "SIREN_RECV"
+
+                with m.State("SIREN_RECV"):
+                    m.d.comb += siren.o.ready.eq(1)
+                    with m.If(siren.o.valid):
+                        m.d.sync += result[c_idx].eq(siren.o.payload)
+                        with m.If(c_idx == self.dim - 1):
+                            m.next = "DONE"
+                        with m.Else():
+                            m.d.sync += c_idx.eq(c_idx + 1)
+                            m.next = "LOAD_MUL_INPUTS"
 
             with m.State("DONE"):
                 m.d.comb += self.o.valid.eq(1)

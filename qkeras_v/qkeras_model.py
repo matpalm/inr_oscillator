@@ -13,7 +13,7 @@ from tensorflow.keras.models import Model
 from qkeras import quantized_bits, QDense, QActivation
 
 from keras_v.model import build_rff_frequency_matrix, FiLM
-
+from amaranth_v.siren_cordic import siren_cordic_output_codes
 
 class NNQSineLUT(Layer):
     """Sine activation via a full signed-code LUT on the NNQ grid.
@@ -40,11 +40,15 @@ class NNQSineLUT(Layer):
         hi = (1 << (self.n_word - 1)) - 1
         scale = float(2**frac)
         codes = np.arange(lo, hi + 1, dtype=np.int64)
-        x = codes.astype(np.float64) / scale
-        y = np.sin(self.omega_0 * x)
-
-        y_codes = np.round(y * scale).astype(np.int64)
-        y_codes = np.clip(y_codes, lo, hi)
+        y_codes = np.asarray(
+            siren_cordic_output_codes(
+                [int(c) for c in codes.tolist()],
+                width=self.n_word,
+                frac_bits=frac,
+                omega_0=self.omega_0,
+            ),
+            dtype=np.int64,
+        )
         y_q = y_codes.astype(np.float32) / scale
 
         self._frac = frac

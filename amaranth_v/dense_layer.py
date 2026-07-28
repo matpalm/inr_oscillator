@@ -8,7 +8,7 @@ from amaranth.lib.memory import Memory
 from amaranth_future import fixed
 
 from . import NNQ, parse_nnq
-
+from .siren_cordic import SirenCordic
 
 # per-output-column fixed cost of a QDenseLayer eval, in sync cycles: the
 # PREFETCH_BIAS / LOAD_BIAS / CLAMP / RELU / TRUNCATE states plus the MAC
@@ -87,8 +87,8 @@ class QDenseLayer(wiring.Component):
     the conv1d POST_PROCESS tail (clamp -> optional relu -> re-clip -> truncate
     toward zero while narrowing NNQ_DW -> out_shape).
 
-    A single instance supports both the qkeras model's ReLU MLP layers
-    (apply_relu=True, out_shape=NNQ) and the final regression layer
+    A single instance supports both the qkeras model's MLP layers
+    (activation in {relu, siren}, out_shape=NNQ) and the final regression layer
     (apply_relu=False, out_shape=<io fixed-point shape>).
 
     Weights are stored in NNQ. The input may be in a different fixed-point shape
@@ -107,6 +107,8 @@ class QDenseLayer(wiring.Component):
         in_shape=NNQ,
         out_shape=NNQ,
         n_lanes: int = 1,
+        activation: str | None = None,
+        siren_omega_0: float = 30.0,
     ):
         """
         Args:
@@ -122,6 +124,10 @@ class QDenseLayer(wiring.Component):
                                         computed simultaneously from one shared input
                                         stream). Clamped to out_d. 1 == fully
                                         sequential (one multiplier).
+            activation                  one of {none, relu, siren}. When unset,
+                                        derives from apply_relu for backward
+                                        compatibility.
+            siren_omega_0               omega_0 for siren activation.
         """
 
         if len(np_kernel.shape) != 2:
@@ -139,12 +145,29 @@ class QDenseLayer(wiring.Component):
                     f"but received {np_bias.shape}"
                 )
 
-        if apply_relu and relu_upper_bound is None:
-            raise Exception("relu_upper_bound is required when apply_relu is set")
+        if activation is None:
+            activation = "relu" if apply_relu else "none"
+        self.activation = str(activation)
+        self.siren_omega_0 = float(siren_omega_0)
+        if self.activation not in {"none", "relu", "siren"}:
+            raise ValueError(
+                f"unsupported activation={self.activation}; expected none/relu/siren"
+            )
+        if apply_relu and self.activation != "relu":
+            raise ValueError(
+                "apply_relu=True is only compatible with activation='relu'"
+            )
+        if self.activation == "relu" and relu_upper_bound is None:
+            raise Exception("relu_upper_bound is required when relu activation is set")
+        if self.activation == "siren":
+            if out_shape.width != NNQ.width or out_shape.f_bits != NNQ.f_bits:
+                raise ValueError("siren activation requires out_shape to match NNQ")
+            if self.siren_omega_0 <= 0.0:
+                raise ValueError(f"siren_omega_0 must be > 0, got {self.siren_omega_0}")
 
         print(
-            f">QDenseLayer IN_D={self.in_d} OUT_D={self.out_d} apply_relu={apply_relu}"
-            f" ( relu_upper_bound={relu_upper_bound} )"
+            f">QDenseLayer IN_D={self.in_d} OUT_D={self.out_d} activation={self.activation}"
+            f" ( relu_upper_bound={relu_upper_bound} siren_omega_0={self.siren_omega_0} )"
             f" in_shape={in_shape!r} out_shape={out_shape!r}"
         )
 
@@ -236,7 +259,7 @@ class QDenseLayer(wiring.Component):
         )
         self.g_idx = Signal(range(self.num_groups), init=0)
 
-        if apply_relu:
+        if self.activation == "relu":
             self.relu_upper_bound = fixed.Const(relu_upper_bound, shape=self.acc_shape)
 
         self.lower_bound = fixed.Const(
@@ -287,6 +310,9 @@ class QDenseLayer(wiring.Component):
             rd_w.append(self.weight_banks[p].read_port(domain="sync"))
             rd_b.append(self.bias_banks[p].read_port(domain="sync"))
 
+        if self.activation == "siren":
+            m.submodules.siren = siren = SirenCordic(self.siren_omega_0)
+
         # one shared input operand (broadcast to every lane) and one weight
         # operand per lane.
         mul_a = Signal(signed(self.in_shape.width), name="qdense_mul_a")
@@ -313,6 +339,20 @@ class QDenseLayer(wiring.Component):
         s1_valid = Signal(name="qdense_s1_valid")
         s2_valid = Signal(name="qdense_s2_valid")
 
+        frac_drop = self.acc_shape.f_bits - self.out_shape.f_bits
+        out_width = self.out_shape.width
+        lower = self.lower_bound
+        upper = self.upper_bound
+
+        if self.activation == "siren":
+            siren_lane_idx = Signal(
+                range(P if P > 1 else 2), name="qdense_siren_lane_idx"
+            )
+            siren_trunc = Array(
+                Signal(signed(self.out_shape.width), name=f"qdense_siren_trunc_{p}")
+                for p in range(P)
+            )
+
         m.d.comb += [
             self.i.ready.eq(0),
             self.o.valid.eq(0),
@@ -324,14 +364,15 @@ class QDenseLayer(wiring.Component):
                 rd_b[p].en.eq(0),
                 rd_b[p].addr.eq(0),
             ]
+        if self.activation == "siren":
+            m.d.comb += [
+                siren.i.valid.eq(0),
+                siren.i.payload.eq(0),
+                siren.o.ready.eq(0),
+            ]
 
         for j in range(self.out_d):
             m.d.comb += self.o.payload[j].eq(self.result[j])
-
-        frac_drop = self.acc_shape.f_bits - self.out_shape.f_bits
-        out_width = self.out_shape.width
-        lower = self.lower_bound
-        upper = self.upper_bound
 
         with m.FSM():
             with m.State("IDLE"):
@@ -432,7 +473,7 @@ class QDenseLayer(wiring.Component):
                 # [lower, upper] ( matches fxpmath/qkeras ), per lane.
                 for p in range(P):
                     clipped = post_clamped[p]
-                    if self.apply_relu:
+                    if self.activation == "relu":
                         relu_ub = self.relu_upper_bound.as_value()
                         post = Mux(
                             clipped < 0,
@@ -469,13 +510,53 @@ class QDenseLayer(wiring.Component):
                         for p in range(P):
                             o = g * P + p
                             if o < self.out_d:
-                                m.d.sync += self.result[o].eq(trunc[p])
+                                if self.activation == "siren":
+                                    m.d.sync += siren_trunc[p].eq(trunc[p])
+                                else:
+                                    m.d.sync += self.result[o].eq(trunc[p])
 
-                with m.If(self.g_idx == self.num_groups - 1):
-                    m.next = "DONE"
-                with m.Else():
-                    m.d.sync += self.g_idx.eq(self.g_idx + 1)
-                    m.next = "PREFETCH_BIAS"
+                if self.activation == "siren":
+                    m.d.sync += siren_lane_idx.eq(0)
+                    m.next = "SIREN_SEND"
+                else:
+                    with m.If(self.g_idx == self.num_groups - 1):
+                        m.next = "DONE"
+                    with m.Else():
+                        m.d.sync += self.g_idx.eq(self.g_idx + 1)
+                        m.next = "PREFETCH_BIAS"
+
+            if self.activation == "siren":
+                with m.State("SIREN_SEND"):
+                    m.d.comb += [
+                        siren.i.valid.eq(1),
+                        siren.i.payload.eq(siren_trunc[siren_lane_idx]),
+                    ]
+                    with m.If(siren.i.ready):
+                        m.next = "SIREN_RECV"
+
+                with m.State("SIREN_RECV"):
+                    m.d.comb += siren.o.ready.eq(1)
+                    for g in range(self.num_groups):
+                        with m.If(self.g_idx == g):
+                            for p in range(P):
+                                o = g * P + p
+                                if o < self.out_d:
+                                    with m.If(siren_lane_idx == p):
+                                        with m.If(siren.o.valid):
+                                            m.d.sync += self.result[o].eq(
+                                                siren.o.payload
+                                            )
+
+                    with m.If(siren.o.valid):
+                        with m.If(siren_lane_idx == P - 1):
+                            with m.If(self.g_idx == self.num_groups - 1):
+                                m.next = "DONE"
+                            with m.Else():
+                                m.d.sync += self.g_idx.eq(self.g_idx + 1)
+                                m.next = "PREFETCH_BIAS"
+                        with m.Else():
+                            m.d.sync += siren_lane_idx.eq(siren_lane_idx + 1)
+                            m.next = "SIREN_SEND"
 
             with m.State("DONE"):
                 m.d.comb += self.o.valid.eq(1)

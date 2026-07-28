@@ -149,6 +149,12 @@ class RffNetwork(wiring.Component):
 
         # extract mapping from layer id to relu bound o_O
         self.relu_upper_bound = model_config["relu_upper_bound"]
+        self.mlp_activation = model_config.get("mlp_activation", "relu")
+        self.siren_omega_0 = float(model_config.get("siren_omega_0", 30.0))
+        if self.mlp_activation not in {"relu", "siren"}:
+            raise ValueError(
+                f"unsupported mlp_activation={self.mlp_activation}; expected relu or siren"
+            )
 
         print(
             f">RffNetwork(film) in_d={self.in_d} embed_dim={self.embed_dim}"
@@ -156,6 +162,7 @@ class RffNetwork(wiring.Component):
             f" film_layers={self.film_layer_idxs}"
             f" mlp_dim={self.mlp_dim} out_d={self.out_d}"
             f" io_shape={self.io_shape!r} lut_size={self.lut_size}"
+            f" mlp_activation={self.mlp_activation}"
         )
 
         # sanity check the film conditioning strength per embed dim (analogous to
@@ -256,11 +263,13 @@ class RffNetwork(wiring.Component):
             mlp = QDenseLayer(
                 w_mlp,
                 b_mlp,
-                apply_relu=not filmed,
-                relu_upper_bound=None if filmed else self.relu_upper_bound,
+                apply_relu=(not filmed and self.mlp_activation == "relu"),
+                relu_upper_bound=self.relu_upper_bound,
                 in_shape=NNQ,
                 out_shape=NNQ,
                 n_lanes=self.mlp_lanes[pos],
+                activation="none" if filmed else self.mlp_activation,
+                siren_omega_0=self.siren_omega_0,
             )
             m.submodules[name] = mlp
             mlps[pos] = mlp
@@ -283,7 +292,12 @@ class RffNetwork(wiring.Component):
             beta = QDenseLayer(
                 w_beta, b_beta, apply_relu=False, in_shape=self.io_shape, out_shape=NNQ
             )
-            combine = FiLMCombine(dim, relu_upper_bound=self.relu_upper_bound)
+            combine = FiLMCombine(
+                dim,
+                relu_upper_bound=self.relu_upper_bound,
+                activation=self.mlp_activation,
+                siren_omega_0=self.siren_omega_0,
+            )
             m.submodules[gamma_name] = gamma
             m.submodules[beta_name] = beta
             m.submodules[f"film{idx}_combine"] = combine
