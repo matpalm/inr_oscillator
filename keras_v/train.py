@@ -27,9 +27,8 @@ from common.callbacks import (
 
 
 def train(opts):
-
-    if opts.mlp_activation != "relu":
-        raise Exception("only relu supported in qkeras_v and amaranth_v")
+    if opts.mlp_activation not in {"relu", "siren"}:
+        raise Exception("only relu or siren supported for keras_v training")
 
     run_path = Path("runs") / opts.run
 
@@ -300,6 +299,7 @@ def build_parser():
         "--mlp-activation",
         type=str,
         default="relu",
+        choices=["relu", "leakyrelu", "siren"],
         help="activation function for mlp layer",
     )
     parser.add_argument(

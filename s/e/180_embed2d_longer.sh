@@ -7,7 +7,7 @@ uv run -m keras_v.train \
  --run ${RUN}/kv \
  --dataset-type embed2d --harsh \
  --num-fourier-features 512 --rff-basis gaussian --rff-scale-min 0.1 --rff-scale-max 5.0 \
- --mlp-dims 32 16 16 --film-layers 1 \
+ --mlp-dims 32 16 16 --film-layers 1\
  --alpha-mse 0.01 --alpha-huber 1.0 \
  --beta-stft-warmup 5 --beta-stft-ramp 5 --beta-stft 0.01 \
  --base-stft-fft-size 2048 --base-stft-win-length 256 \

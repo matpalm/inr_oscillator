@@ -1,4 +1,5 @@
 import os
+import math
 
 os.environ.setdefault("TF_USE_LEGACY_KERAS", "1")
 
@@ -16,6 +17,21 @@ from tensorflow.keras.layers import (
 from tensorflow.keras.models import Model
 from pathlib import Path
 import json
+
+
+def _siren_kernel_initializer(fan_in: int, omega_0: float, is_first: bool):
+    """SIREN init from Sitzmann et al. for layers followed by sin(omega_0 * x)."""
+    fan_in = int(fan_in)
+    if fan_in <= 0:
+        raise ValueError(f"fan_in must be > 0 for siren init, got {fan_in}")
+    if omega_0 <= 0.0:
+        raise ValueError(f"omega_0 must be > 0 for siren init, got {omega_0}")
+
+    if is_first:
+        limit = 1.0 / fan_in
+    else:
+        limit = math.sqrt(6.0 / fan_in) / omega_0
+    return tf.keras.initializers.RandomUniform(minval=-limit, maxval=limit)
 
 
 class FiLM(Layer):
@@ -283,6 +299,10 @@ def create_rff_inr_model(
     if film_layers < 1:
         raise ValueError("film_layers must be >= 1 (concat path removed)")
     film_layers = min(film_layers, len(mlp_dims))
+    if mlp_activation not in {"relu", "leaky_relu", "siren"}:
+        raise ValueError(
+            "mlp_activation must be one of {'relu', 'leaky_relu', 'siren'}"
+        )
 
     inp = Input((None, in_d))
 
@@ -312,7 +332,23 @@ def create_rff_inr_model(
         # note; h, gamma and beta will be able to run in parallel
         # and, if required gamma and beta can be done at a lower rate
 
-        h = Dense(mlp_dim, activation=None, name=f"mlp{i}")(h)
+        if mlp_activation == "siren":
+            # SIREN init for layers followed by sin(omega_0 * x).
+            fan_in = int(h.shape[-1])
+            omega_0 = 30.0
+            h = Dense(
+                mlp_dim,
+                activation=None,
+                kernel_initializer=_siren_kernel_initializer(
+                    fan_in=fan_in,
+                    omega_0=omega_0,
+                    is_first=(i == 0),
+                ),
+                bias_initializer="zeros",
+                name=f"mlp{i}",
+            )(h)
+        else:
+            h = Dense(mlp_dim, activation=None, name=f"mlp{i}")(h)
         if i < film_layers:
             # zero-init so FiLM starts as identity
             gamma = Dense(
@@ -332,7 +368,9 @@ def create_rff_inr_model(
 
             h = FiLM(name=f"film{i}")([h, gamma, beta])
 
-        if mlp_activation == "leaky_relu":
+        if mlp_activation == "siren":
+            h = Lambda(lambda t: tf.sin(30.0 * t), name=f"siren{i}")(h)
+        elif mlp_activation == "leaky_relu":
             print("layer", i, "leaky 0.25", "(film)" if i < film_layers else "")
             h = LeakyReLU(alpha=0.25)(h)
         else:

@@ -65,7 +65,7 @@ def slope(reduce_mean: bool = True):
         l1 = tf.abs(d_true - d_pred)
         # average over elements of y...
         l1 = tf.reduce_mean(l1, axis=-1)
-        # ...then per-example mean over S -> (B,)
+        # return per-example average over sequence, optionally reduced over batch
         l1 = tf.reduce_mean(l1, axis=-1)
         return tf.reduce_mean(l1) if reduce_mean else l1
 
