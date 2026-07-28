@@ -14,6 +14,68 @@ from qkeras import quantized_bits, QDense, QActivation
 
 from keras_v.model import build_rff_frequency_matrix, FiLM
 
+
+class NNQSineLUT(Layer):
+    """Sine activation via a full signed-code LUT on the NNQ grid.
+
+    Inputs are rounded/clipped to NNQ integer codes, then mapped through a LUT
+    storing quantised ``sin(omega_0 * x)`` on that same grid.
+    """
+
+    def __init__(self, n_word: int, n_int: int, omega_0: float = 30.0, **kwargs):
+        super().__init__(**kwargs)
+        self.n_word = int(n_word)
+        self.n_int = int(n_int)
+        self.omega_0 = float(omega_0)
+        self.keep_negative = 1
+
+    def build(self, input_shape):
+        frac = self.n_word - self.n_int - self.keep_negative
+        if frac < 0:
+            raise ValueError(
+                f"invalid NNQ shape for sine LUT: n_word={self.n_word}, n_int={self.n_int}"
+            )
+
+        lo = -(1 << (self.n_word - 1))
+        hi = (1 << (self.n_word - 1)) - 1
+        scale = float(2**frac)
+        codes = np.arange(lo, hi + 1, dtype=np.int64)
+        x = codes.astype(np.float64) / scale
+        y = np.sin(self.omega_0 * x)
+
+        y_codes = np.round(y * scale).astype(np.int64)
+        y_codes = np.clip(y_codes, lo, hi)
+        y_q = y_codes.astype(np.float32) / scale
+
+        self._frac = frac
+        self._scale = tf.constant(scale, dtype=tf.float32)
+        self._lo = tf.constant(float(lo), dtype=tf.float32)
+        self._hi = tf.constant(float(hi), dtype=tf.float32)
+        self._offset = tf.constant(-lo, dtype=tf.int32)
+        self._lut = tf.constant(y_q, dtype=tf.float32)
+        super().build(input_shape)
+
+    def call(self, inputs):
+        # quantise to NNQ codes first so activation matches the hardware-style
+        # fixed-point datapath semantics.
+        q_codes = tf.round(inputs * self._scale)
+        q_codes = tf.clip_by_value(q_codes, self._lo, self._hi)
+        q_codes = tf.cast(q_codes, tf.int32)
+        idx = q_codes + self._offset
+        return tf.gather(self._lut, idx)
+
+    def get_config(self):
+        config = super().get_config()
+        config.update(
+            {
+                "n_word": self.n_word,
+                "n_int": self.n_int,
+                "omega_0": self.omega_0,
+            }
+        )
+        return config
+
+
 class QRandomFourierFeatures(Layer):
     """
     fixed fourier feature mapping.
@@ -158,6 +220,8 @@ class QKerasRFFModelBuilder(object):
         out_d: int,
         relu_upper_bound: float,
         film_layers: int = 1,
+        mlp_activation: str = "relu",
+        siren_omega_0: float = 30.0,
     ):
         # phase -> quantised Random Fourier Features -> FiLM-conditioned dense
         # -> quantised ReLU MLP -> quantised output.
@@ -172,6 +236,12 @@ class QKerasRFFModelBuilder(object):
         self.out_d = out_d
         self.relu_upper_bound = relu_upper_bound
         self.film_layers = int(film_layers)
+        self.mlp_activation = str(mlp_activation)
+        self.siren_omega_0 = float(siren_omega_0)
+        if self.mlp_activation not in {"relu", "siren"}:
+            raise ValueError(
+                f"unsupported mlp_activation={self.mlp_activation}; expected relu or siren"
+            )
         if self.film_layers < 1:
             raise ValueError("film_layers must be >= 1 (concat path removed)")
         self.film_layers = min(self.film_layers, len(mlp_dims))
@@ -221,6 +291,18 @@ class QKerasRFFModelBuilder(object):
     def quant_relu(self):
         return f"quantized_relu({self.mlp_n_word},{self.mlp_n_int},relu_upper_bound={self.relu_upper_bound})"
 
+    def _siren_kernel_initializer(self, fan_in: int, is_first: bool):
+        fan_in = int(fan_in)
+        if fan_in <= 0:
+            raise ValueError(f"fan_in must be > 0 for siren init, got {fan_in}")
+        if self.siren_omega_0 <= 0.0:
+            raise ValueError(f"siren_omega_0 must be > 0, got {self.siren_omega_0}")
+        if is_first:
+            limit = 1.0 / fan_in
+        else:
+            limit = math.sqrt(6.0 / fan_in) / self.siren_omega_0
+        return tf.keras.initializers.RandomUniform(minval=-limit, maxval=limit)
+
     def get_b_io_quant_sizes(self):
         rff_b_quant = self.b_quantiser()
         rff_io_quant = self.io_quantiser()
@@ -259,11 +341,21 @@ class QKerasRFFModelBuilder(object):
         # main path carries only the RFF(phase); embed_q conditions via FiLM.
         h = rff
         for i, dim in enumerate(self.mlp_dims):
+            dense_kwargs = {}
+            if self.mlp_activation == "siren":
+                fan_in = int(h.shape[-1])
+                dense_kwargs["kernel_initializer"] = self._siren_kernel_initializer(
+                    fan_in=fan_in,
+                    is_first=(i == 0),
+                )
+                dense_kwargs["bias_initializer"] = "zeros"
+
             h = QDense(
                 dim,
                 kernel_quantizer=self.quantiser(),
                 bias_quantizer=self.quantiser(double_width=True),
                 name=f"mlp{i}",
+                **dense_kwargs,
             )(h)
             if i < self.film_layers:
                 # zero-init so FiLM starts as identity
@@ -289,7 +381,15 @@ class QKerasRFFModelBuilder(object):
 
                 h = FiLM(name=f"film{i}")([h, gamma, beta])
 
-            h = QActivation(self.quant_relu(), name=f"qrelu{i}")(h)
+            if self.mlp_activation == "siren":
+                h = NNQSineLUT(
+                    self.mlp_n_word,
+                    self.mlp_n_int,
+                    omega_0=self.siren_omega_0,
+                    name=f"qsiren{i}",
+                )(h)
+            else:
+                h = QActivation(self.quant_relu(), name=f"qrelu{i}")(h)
 
         y_pred = QDense(
             self.out_d,

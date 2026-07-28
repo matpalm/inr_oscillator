@@ -118,6 +118,8 @@ def train(opts):
             "basis": opts.rff_basis,
         },
         "mlp_dims": opts.mlp_dims,
+        "mlp_activation": opts.mlp_activation,
+        "siren_omega_0": opts.siren_omega_0,
         "out_d": data.out_d(),
         "relu_upper_bound": opts.relu_upper_bound,
         "film_layers": opts.film_layers,
@@ -432,6 +434,19 @@ def build_parser():
         nargs="+",
         default=[16, 16],
         help="per-layer node counts, e.g. --mlp-dims 8 32 32 => 3 layers",
+    )
+    parser.add_argument(
+        "--mlp-activation",
+        type=str,
+        default="relu",
+        choices=["relu", "siren"],
+        help="activation used in MLP layers",
+    )
+    parser.add_argument(
+        "--siren-omega-0",
+        type=float,
+        default=30.0,
+        help="omega_0 scale for siren activation sin(omega_0*x)",
     )
     parser.add_argument(
         "--film-layers",
