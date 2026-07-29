@@ -66,7 +66,14 @@ class NNQSineLUT(Layer):
         q_codes = tf.clip_by_value(q_codes, self._lo, self._hi)
         q_codes = tf.cast(q_codes, tf.int32)
         idx = q_codes + self._offset
-        return tf.gather(self._lut, idx)
+        y_lut = tf.gather(self._lut, idx)
+        # Straight-through estimator: the LUT path (round/cast/gather) is
+        # non-differentiable and returns zero gradient, which would stall
+        # training of every layer feeding this activation. Keep the exact
+        # hardware LUT value on the forward pass, but route gradients through
+        # the continuous sin(omega_0 * x) so backprop sees omega_0*cos(omega_0*x).
+        y_cont = tf.sin(self.omega_0 * inputs)
+        return tf.stop_gradient(y_lut - y_cont) + y_cont
 
     def get_config(self):
         config = super().get_config()
@@ -226,6 +233,7 @@ class QKerasRFFModelBuilder(object):
         film_layers: int = 1,
         mlp_activation: str = "relu",
         siren_omega_0: float = 30.0,
+        phase_h_index_bits: int = 13,
     ):
         # phase -> quantised Random Fourier Features -> FiLM-conditioned dense
         # -> quantised ReLU MLP -> quantised output.
@@ -242,6 +250,9 @@ class QKerasRFFModelBuilder(object):
         self.film_layers = int(film_layers)
         self.mlp_activation = str(mlp_activation)
         self.siren_omega_0 = float(siren_omega_0)
+        # deployment-only: PSRAM phase->h table index bits (not used by the
+        # keras graph, but accepted so build(**model_config) round-trips).
+        self.phase_h_index_bits = int(phase_h_index_bits)
         if self.mlp_activation not in {"relu", "siren"}:
             raise ValueError(
                 f"unsupported mlp_activation={self.mlp_activation}; expected relu or siren"
