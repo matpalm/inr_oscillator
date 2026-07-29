@@ -183,10 +183,6 @@ def train(opts):
 
         keep_k = opts.num_fourier_features
         pruned_model, _, selected_idxs = prune_rff_by_l1(src_model, src_config, keep_k)
-        print(
-            f"selected top {keep_k}/{src_config['rff']['num_features']} "
-            f"frequencies: {selected_idxs.tolist()}"
-        )
 
         # selected (folded) frequency matrix B into the qkeras RFF layer
         train_model.get_layer("rff").B.assign(pruned_model.get_layer("rff").B.numpy())
