@@ -66,18 +66,12 @@ class NNQSineLUT(Layer):
         q_codes = tf.clip_by_value(q_codes, self._lo, self._hi)
         q_codes = tf.cast(q_codes, tf.int32)
         idx = q_codes + self._offset
-        return tf.gather(self._lut, idx)
-
-        raise Exception("need to resolve this STE super noisy :/")
-
-        # y_lut = tf.gather(self._lut, idx)
         # Straight-through estimator: the LUT path (round/cast/gather) is
-        # non-differentiable and returns zero gradient, which would stall
-        # training of every layer feeding this activation. Keep the exact
-        # hardware LUT value on the forward pass, but route gradients through
-        # the continuous sin(omega_0 * x) so backprop sees omega_0*cos(omega_0*x).
-        # y_cont = tf.sin(self.omega_0 * inputs)
-        # return tf.stop_gradient(y_lut - y_cont) + y_cont
+        # non-differentiable so route gradients through the continuous
+        # sin(omega_0 * x) ( so backprop sees omega_0*cos(omega_0*x) )
+        y_lut = tf.gather(self._lut, idx)
+        y_cont = tf.sin(self.omega_0 * inputs)
+        return tf.stop_gradient(y_lut - y_cont) + y_cont
 
     def get_config(self):
         config = super().get_config()
