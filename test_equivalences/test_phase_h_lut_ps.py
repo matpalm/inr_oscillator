@@ -6,13 +6,13 @@ scalar phase::
 
     h = mlp0(RFF(phase))
 
-``PhaseHLutPS`` materialises this whole table in PSRAM once at startup (BUILD),
-then serves inference as a pure PSRAM read. This test:
+``PhaseHLutPS`` serves this table as a pure PSRAM read; the table is preloaded
+into PSRAM (in deployment from ``phase_h_lut.bin``). This test:
 
-  1. builds a ``PhaseHLutPS`` (with a *small* ``index_bits`` so the build sweep
-     is quick) from a real trained run, backed by a ``FakePSRAM``;
-  2. waits for the startup build to complete (``ready``);
-  3. reads back every phase index and compares to an integer-exact numpy golden
+  1. builds the integer-exact numpy golden table from a real trained run;
+  2. preloads a ``FakePSRAM`` with the packed golden table and builds a
+     ``PhaseHLutPS`` (with a *small* ``index_bits``) backed by it;
+  3. reads back every phase index and compares to the golden
      (``rff_lut_features`` -> ``dense_golden`` with ``apply_relu=False``).
 
 Run from the repo root::
@@ -98,18 +98,41 @@ def build_h_table(net, index_bits):
     return h, phase_codes
 
 
-def simulate(phlut, phase_codes, max_wait=2_000_000):
-    """Build the table, then read h back for every phase code (io codes in)."""
+def _pack_table(golden, base_words):
+    """Pack the (num_entries, out_d) NNQ golden table into 32-bit PSRAM words.
+
+    ``out_d`` is a power of two, so the internal 16-bit word address is simply
+    ``idx*out_d + dim``; two consecutive 16-bit codes share one 32-bit word
+    (even -> low half, odd -> high half). ``base_words`` shifts the region by
+    the adapter's byte base (``base >> 2``).
+    """
+    flat = (golden.astype(np.int64) & 0xFFFF).reshape(-1)
+    if flat.size % 2:
+        flat = np.append(flat, 0)
+    low = flat[0::2]
+    high = flat[1::2]
+    words = (low | (high << 16)).astype(np.uint32)
+    if base_words:
+        words = np.concatenate([np.zeros(base_words, dtype=np.uint32), words])
+    return words
+
+
+def simulate(phlut, phase_codes, golden, max_wait=2_000_000):
+    """Preload the table into PSRAM, then read h back for every phase code."""
     out_d = phlut.out_d
 
     m = Module()
     m.submodules.dut = phlut
 
-    total_words = phlut.num_entries * phlut.dim_stride
-    ext_words = math.ceil(total_words / 2)
-    storage_words = 1 << math.ceil(math.log2(ext_words + 1))
+    base_words = phlut._adapter.base >> 2
+    init_words = _pack_table(golden, base_words)
+    storage_words = 1 << math.ceil(math.log2(init_words.size + 1))
     m.submodules.psram = psram = FakePSRAM(
-        addr_width=22, data_width=32, storage_words=storage_words, latency_cycles=4
+        addr_width=22,
+        data_width=32,
+        storage_words=storage_words,
+        latency_cycles=4,
+        init=init_words.tolist(),
     )
     wiring.connect(m, phlut.bus, psram.bus)
 
@@ -117,15 +140,6 @@ def simulate(phlut, phase_codes, max_wait=2_000_000):
 
     async def testbench(ctx):
         ctx.set(phlut.o.ready, 1)
-
-        # wait for the startup build to fill the whole table.
-        built = False
-        for _ in range(max_wait):
-            if ctx.get(phlut.ready):
-                built = True
-                break
-            await ctx.tick()
-        assert built, "PhaseHLutPS build never completed"
 
         for code in phase_codes:
             ctx.set(phlut.i.payload, int(code))
@@ -192,7 +206,7 @@ class TestPhaseHLutPS(unittest.TestCase):
         phlut = net.phlut
 
         golden, phase_codes = build_h_table(net, self.INDEX_BITS)
-        hw = simulate(phlut, phase_codes)
+        hw = simulate(phlut, phase_codes, golden)
 
         self.assertEqual(golden.shape, hw.shape)
         if not np.array_equal(golden, hw):

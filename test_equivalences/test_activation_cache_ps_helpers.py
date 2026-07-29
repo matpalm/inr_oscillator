@@ -19,10 +19,17 @@ class FakePSRAM(wiring.Component):
     """Fake PSRAM for testbenches with configurable access latency."""
 
     def __init__(
-        self, *, addr_width=22, data_width=32, storage_words=512, latency_cycles=4
+        self,
+        *,
+        addr_width=22,
+        data_width=32,
+        storage_words=512,
+        latency_cycles=4,
+        init=None,
     ):
         self.latency_cycles = latency_cycles
         self.storage_words = storage_words
+        self.init = list(init) if init is not None else []
         super().__init__(
             {
                 "bus": In(
@@ -43,7 +50,7 @@ class FakePSRAM(wiring.Component):
         memory = Memory(
             shape=unsigned(self.bus.signature.data_width),
             depth=self.storage_words,
-            init=[],
+            init=self.init,
         )
         m.submodules.memory = memory
         mem_wr_port = memory.write_port(granularity=8)
