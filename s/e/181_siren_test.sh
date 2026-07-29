@@ -31,7 +31,7 @@ uv run -m qkeras_v.train \
  --beta-stft-warmup 2 --beta-stft-ramp 2 --beta-stft 0.001 \
  --base-stft-fft-size 2048 --base-stft-win-length 256 \
  --gamma-slope 0.1 --delta-dc 1e-4 \
- --epochs 10 --learning-rate 1e-3 \
+ --epochs 10 --learning-rate 1e-3 --cosine-schedule \
  --num-train-samples 10_000 --batch-size 128
 
 export WEIGHTS_PKL=$PWD/runs/$RUN/qkv/weights/qkeras/latest.pkl

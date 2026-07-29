@@ -15,7 +15,7 @@ uv run -m keras_v.train \
  --base-stft-fft-size 2048 --base-stft-win-length 256 \
  --gamma-slope 0.1 --delta-dc 1e-4 \
  --epochs 20 --learning-rate 1e-3 --cosine-schedule \
- --num-train-samples 40_000 --batch-size 128
+ --num-train-samples 10_000 --batch-size 128
 
 # continue with qkeras_v;
 uv run -m qkeras_v.train \
