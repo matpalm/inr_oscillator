@@ -12,7 +12,6 @@ FREQS = {
 }
 FREQS["C3"] = FREQS["C4"] / 2
 FREQS["C5"] = FREQS["C4"] * 2
-print("FREQ", FREQS)
 
 IN_D = 3
 OUT_D = 1

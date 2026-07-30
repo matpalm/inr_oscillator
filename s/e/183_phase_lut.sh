@@ -2,8 +2,6 @@ set -ex
 
 export RUN=183_phase_lut
 
-# c.f. 180 relu
-
 # run initial keras_v model
 uv run -m keras_v.train \
  --run $RUN/kv \
@@ -31,6 +29,8 @@ uv run -m qkeras_v.train \
  --gamma-slope 0.1 --delta-dc 1e-4 \
  --epochs 10 --learning-rate 1e-3 --cosine-schedule  \
  --num-train-samples 10_000 --batch-size 128
+
+# TODO: these should move into a json config and be loaded like everything elsez
 
 export WEIGHTS_PKL=$PWD/runs/$RUN/qkv/weights/qkeras/latest.pkl
 export PHASE_H_BIN=$PWD/runs/$RUN/qkv/weights/qkeras/phase_h_lut.bin

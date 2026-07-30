@@ -2,8 +2,6 @@ set -ex
 
 export RUN=184_simplify_voct
 
-# c.f. 180 relu
-
 # run initial keras_v model
 uv run -m keras_v.train \
  --run $RUN/kv \

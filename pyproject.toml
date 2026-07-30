@@ -20,4 +20,5 @@ dependencies = [
     "tensorflow[and-cuda]==2.16.2",
     "tf-keras>=2.16.0",
     "zarr>=2.18.3",
+    "wandb>=0.28.0",
 ]

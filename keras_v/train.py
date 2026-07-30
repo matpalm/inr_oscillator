@@ -9,6 +9,7 @@ tf.get_logger().setLevel("ERROR")
 from pathlib import Path
 import json
 import argparse
+import wandb
 
 from tensorflow.keras.optimizers import AdamW
 
@@ -24,7 +25,7 @@ from common.callbacks import (
     CheckYPred,
     PrintRffMlp0Weights,
 )
-
+from wandb.integration.keras import WandbMetricsLogger
 
 def train(opts):
     if opts.mlp_activation not in {"relu", "siren"}:
@@ -107,6 +108,7 @@ def train(opts):
         },
         "mlp_dims": opts.mlp_dims,
         "mlp_activation": opts.mlp_activation,
+        "siren_omega": opts.siren_omega,
         "out_d": data.out_d(),
         "rff_l1": opts.rff_l1,
         "film_layers": opts.film_layers,
@@ -114,6 +116,16 @@ def train(opts):
     print("model_config", model_config)
     with open(run_path / "model_config.json", "w") as f:
         json.dump(model_config, f)
+
+    if opts.use_wandb:
+        wandb.init(
+            project="inr_oscillator", name=str(opts.run), reinit="finish_previous"
+        )
+        for k, v in vars(opts).items():
+            wandb.config[k] = v
+        for k, v in model_config.items():
+            wandb.config[k] = v
+
     train_model = create_rff_inr_model(**model_config)
 
     if opts.lambda_morph_consistency > 0.0:
@@ -128,7 +140,6 @@ def train(opts):
     )
 
     callbacks = []
-
     # log beta_stft (and lr) into the logs before the TensorBoard callback
     callbacks.append(LogLrAndBetaStft(beta_stft_var=beta_stft))
     callbacks.append(
@@ -143,8 +154,9 @@ def train(opts):
     callbacks.append(CheckYPred(tb_dir=str(tensorboard_dir), dataset=validate_ds))
     if ramp_callback is not None:
         callbacks.append(ramp_callback)
-
     callbacks.append(tf.keras.callbacks.TensorBoard(log_dir=str(tensorboard_dir)))
+    if opts.use_wandb:
+        callbacks.append(WandbMetricsLogger())
 
     def halving_triple(base):
         # o_O
@@ -215,6 +227,7 @@ def train(opts):
 
     train_model.fit(train_ds, callbacks=callbacks, epochs=opts.epochs, verbose=2)
 
+    wandb.finish()
 
 def build_parser():
     parser = argparse.ArgumentParser(
@@ -303,6 +316,12 @@ def build_parser():
         help="activation function for mlp layer",
     )
     parser.add_argument(
+        "--siren-omega",
+        type=float,
+        default=30.0,
+        help="omega value for siren activation when --mlp-activation siren",
+    )
+    parser.add_argument(
         "--film-layers",
         type=int,
         default=1,
@@ -374,6 +393,7 @@ def build_parser():
         default=None,
         help="base STFT hop size. dfts to 1/4 --base-stft-win-length. resolutions are (base, base//2, base//4)",
     )
+    parser.add_argument("--use-wandb", action="store_true")
 
     embed_2d_data_args = parser.add_argument_group("Embed2DQuadratureData")
     Embed2DQuadratureData.add_args(embed_2d_data_args)

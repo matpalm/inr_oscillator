@@ -271,6 +271,7 @@ def create_rff_inr_model(
     out_d: int,
     rff_l1: float = 0.0,
     film_layers: int = 1,
+    siren_omega: float = 30.0,
 ):
     """creates an implicit neural representation (INR) model
 
@@ -290,7 +291,7 @@ def create_rff_inr_model(
         out_d: network output size; likely 1
         rff_l1: if set, l1 to apply to rff.B ( for later pruning )
         film_layers: apply film to first N layers; must be >= 1
-
+        siren_omega: omegas value for siren ( if using siren )
     """
 
     if film_layers is None:
@@ -335,13 +336,12 @@ def create_rff_inr_model(
         if mlp_activation == "siren":
             # SIREN init for layers followed by sin(omega_0 * x).
             fan_in = int(h.shape[-1])
-            omega_0 = 30.0
             h = Dense(
                 mlp_dim,
                 activation=None,
                 kernel_initializer=_siren_kernel_initializer(
                     fan_in=fan_in,
-                    omega_0=omega_0,
+                    omega_0=siren_omega,
                     is_first=(i == 0),
                 ),
                 bias_initializer="zeros",
@@ -414,11 +414,11 @@ def prune_rff_by_l1(model, model_config: dict, keep_k: int):
     selected_idxs = np.argsort(np.abs(effective_feature))[::-1][:keep_k]
 
     # debug
-    with np.printoptions(suppress=True):
-        print("---- keras_v model")
-        print("row_norm", np.around(row_norm[selected_idxs], 3))
-        print("gate", np.around(gate[selected_idxs], 3))
-        print("effective_feature", np.around(effective_feature[selected_idxs], 3))
+    # with np.printoptions(suppress=True):
+    #     print("---- keras_v model")
+    #     print("row_norm", np.around(row_norm[selected_idxs], 3))
+    #     print("gate", np.around(gate[selected_idxs], 3))
+    #     print("effective_feature", np.around(effective_feature[selected_idxs], 3))
 
     # clone config with updates and make new model
     pruned_config = copy.deepcopy(model_config)
