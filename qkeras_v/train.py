@@ -20,7 +20,7 @@ from qkeras.utils import model_save_quantized_weights
 
 from .qkeras_model import QKerasRFFModelBuilder
 from keras_v.model import create_rff_inr_model, prune_rff_by_l1
-from tf_data.quadrature_data import Embed2DQuadratureData
+from tf_data.embed_2d_data import Embed2DData
 
 # from tf_data.pcapture_static_data import ParametricCaptureStaticData
 from tf_data.pcapture_inmem_data import ParametricCaptureStaticData

@@ -14,10 +14,13 @@ import wandb
 from tensorflow.keras.optimizers import AdamW
 
 from .model import create_rff_inr_model
-from tf_data.quadrature_data import Embed2DQuadratureData
 
-# from tf_data.pcapture_static_data import ParametricCaptureStaticData
-from tf_data.pcapture_inmem_data import ParametricCaptureStaticData
+from tf_data.dataset_builder import (
+    build_datasets,
+    add_dataset_parser_args,
+    dataset_types,
+)
+
 from common.losses import combined_loss_terms
 from common.callbacks import (
     setup_beta_stft_var_and_update_callback,
@@ -28,8 +31,18 @@ from common.callbacks import (
 from wandb.integration.keras import WandbMetricsLogger
 
 def train(opts):
-    if opts.mlp_activation not in {"relu", "siren"}:
-        raise Exception("only relu or siren supported for keras_v training")
+    activation_aliases = {
+        "leakyrelu": "leaky_relu",
+        "leaky-relu": "leaky_relu",
+    }
+    opts.mlp_activation = activation_aliases.get(
+        opts.mlp_activation, opts.mlp_activation
+    )
+    if opts.mlp_activation not in {"relu", "leaky_relu", "siren", "silu", "gelu"}:
+        raise Exception(
+            "unsupported --mlp-activation. expected one of "
+            "{relu, leaky_relu, siren, silu, gelu}"
+        )
 
     run_path = Path("runs") / opts.run
 
@@ -48,50 +61,7 @@ def train(opts):
     print("TRAIN_SEQ_LEN", train_seq_len)
     print("TEST_SEQ_LEN", opts.test_seq_len)
 
-    if opts.dataset_type == "embed2d":
-        data = Embed2DQuadratureData(
-            min_note=opts.min_note,
-            max_note=opts.max_note,
-            sample_rate_khz=opts.sample_rate_khz,
-            harsh=opts.harsh,
-            seed=opts.seed,
-        )
-        train_ds = data.tf_dataset(
-            batch_size=opts.batch_size,
-            seq_len=train_seq_len,
-            num_samples=opts.num_train_samples,
-            emit_endpt_samples=True,
-            emit_interpolated_samples=True,
-        )
-        validate_ds = data.tf_dataset(
-            batch_size=opts.batch_size,
-            seq_len=opts.test_seq_len,
-            num_samples=opts.num_validate_samples,
-            emit_endpt_samples=True,
-            emit_interpolated_samples=True,
-        )
-    elif opts.dataset_type == "pcapture":
-        data = ParametricCaptureStaticData(
-            capture_run=opts.capture_run,
-            keras_model=opts.keras_model,
-            seed=123,
-        )
-        train_ds = data.tf_training_dataset(
-            seq_len=train_seq_len,
-            num_batches=opts.num_train_samples // opts.batch_size,
-            batch_size=opts.batch_size,
-            emit_weights=True,
-            deterministic=False,
-        )
-        validate_ds = data.tf_training_dataset(
-            seq_len=opts.test_seq_len,
-            num_batches=opts.num_train_samples // opts.batch_size,
-            batch_size=opts.batch_size,
-            emit_weights=False,
-            deterministic=True,
-        )
-    else:
-        raise Exception("unknown --dataset-type")
+    data, train_ds, validate_ds = build_datasets(opts)
 
     # TODO: if film caching works there no reason to fo rff_l1 since
     # it will be baked away
@@ -169,7 +139,7 @@ def train(opts):
         return triple
 
     if opts.base_stft_hop_size is None:
-        stft_hop_sizes = halving_triple(opts.base_stft_fft_size // 4)
+        stft_hop_sizes = halving_triple(opts.base_stft_win_length // 4)
     else:
         stft_hop_sizes = halving_triple(opts.base_stft_hop_size)
 
@@ -250,7 +220,7 @@ def build_parser():
     parser.add_argument("--epochs", type=int, default=10)
     parser.add_argument(
         "--dataset-type",
-        choices=["embed2d", "pcapture"],
+        choices=dataset_types(),
         help="dataset type",
     )
     parser.add_argument("--batch-size", type=int, default=32)
@@ -312,7 +282,7 @@ def build_parser():
         "--mlp-activation",
         type=str,
         default="relu",
-        choices=["relu", "leakyrelu", "siren"],
+        choices=["relu", "leakyrelu", "leaky_relu", "siren", "silu", "gelu"],
         help="activation function for mlp layer",
     )
     parser.add_argument(
@@ -395,11 +365,7 @@ def build_parser():
     )
     parser.add_argument("--use-wandb", action="store_true")
 
-    embed_2d_data_args = parser.add_argument_group("Embed2DQuadratureData")
-    Embed2DQuadratureData.add_args(embed_2d_data_args)
-
-    pcapture_data_args = parser.add_argument_group("ParametricCaptureStaticData")
-    ParametricCaptureStaticData.add_args(pcapture_data_args)
+    add_dataset_parser_args(parser)
 
     return parser
 

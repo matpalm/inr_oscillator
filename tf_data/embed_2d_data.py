@@ -8,6 +8,7 @@ from qkeras import quantized_bits
 # base everything off C3 -> C5 to easier match BSP
 A4 = 440
 FREQS = {
+    "A4": A4,
     "C4": A4 * (2 ** (-9 / 12)),
 }
 FREQS["C3"] = FREQS["C4"] / 2
@@ -61,7 +62,7 @@ def sample_freq(min_freq, max_freq, alpha):
     return 2**sample_freq_2
 
 
-class Embed2DQuadratureData(object):
+class Embed2DData(object):
 
     @classmethod
     def add_args(cls, parser):
@@ -373,12 +374,12 @@ if __name__ == "__main__":
 
     PLOT_W = 320
     PLOT_H = 240
-    from PIL import Image, ImageDraw
+    from PIL import Image, ImageDraw, ImageFont
 
     # NxN images, with only border set
     N = opts.grid_size
     collage = Image.new(size=(PLOT_W * N, PLOT_H * N), mode="RGB")
-    plot_data_source = Embed2DQuadratureData(
+    plot_data_source = Embed2DData(
         min_note=opts.min_note,
         max_note=opts.max_note,
         sample_rate_khz=192,
@@ -435,6 +436,39 @@ if __name__ == "__main__":
     def plot_single(w1):
         return plot_interp(w1, None, None)
 
+    def format_embed(embed_pt):
+        e0 = float(embed_pt[0])
+        e1 = float(embed_pt[1])
+        return f"({e0:.1f}, {e1:.1f})"
+
+    def overlay_embed_label(pil_img, embed_pt):
+        label = format_embed(embed_pt)
+        out = pil_img.copy()
+        draw = ImageDraw.Draw(out)
+        try:
+            font = ImageFont.truetype("DejaVuSans.ttf", 18)
+        except OSError:
+            font = ImageFont.load_default()
+
+        bbox = draw.textbbox((0, 0), label, font=font)
+        text_w = bbox[2] - bbox[0]
+        text_h = bbox[3] - bbox[1]
+        x = max(0, (PLOT_W - text_w) // 2)
+        y = 6
+        pad_x = 6
+        pad_y = 2
+
+        draw.rectangle(
+            [x - pad_x, y - pad_y, x + text_w + pad_x, y + text_h + pad_y],
+            fill="white",
+        )
+        draw.text((x, y), label, fill="black", font=font)
+        return out
+
+    def paste_labeled(pil_img, grid_x, grid_y, embed_pt):
+        labeled = overlay_embed_label(pil_img, embed_pt)
+        collage.paste(labeled, (grid_x * PLOT_W, grid_y * PLOT_H))
+
     # points based on grid
     top_left = Waveform.SAW
     top_right = Waveform.ZIGZAG
@@ -442,21 +476,41 @@ if __name__ == "__main__":
     bottom_left = Waveform.SINE
 
     # corners
-    collage.paste(plot_single(top_left), (0, 0))
-    collage.paste(plot_single(top_right), ((N - 1) * PLOT_W, 0))
-    collage.paste(plot_single(bottom_right), ((N - 1) * PLOT_W, (N - 1) * PLOT_H))
-    collage.paste(plot_single(bottom_left), (0, (N - 1) * PLOT_H))
+    paste_labeled(plot_single(top_left), 0, 0, top_left.to_embed_pt())
+    paste_labeled(plot_single(top_right), N - 1, 0, top_right.to_embed_pt())
+    paste_labeled(
+        plot_single(bottom_right),
+        N - 1,
+        N - 1,
+        bottom_right.to_embed_pt(),
+    )
+    paste_labeled(plot_single(bottom_left), 0, N - 1, bottom_left.to_embed_pt())
 
     # edges
     for i in [k / (N - 1) for k in range(1, N - 1)]:
+        grid_k = int(round((N - 1) * i))
+
+        embed_top = ((1.0 - i) * top_left.to_embed_pt()) + (i * top_right.to_embed_pt())
         interp_img = plot_interp(top_left, top_right, interp=i)
-        collage.paste(interp_img, (int(PLOT_W * (N - 1) * i), 0))
+        paste_labeled(interp_img, grid_k, 0, embed_top)
+
+        embed_right = ((1.0 - i) * top_right.to_embed_pt()) + (
+            i * bottom_right.to_embed_pt()
+        )
         interp_img = plot_interp(top_right, bottom_right, interp=i)
-        collage.paste(interp_img, ((N - 1) * PLOT_W, int(PLOT_H * (N - 1) * i)))
+        paste_labeled(interp_img, N - 1, grid_k, embed_right)
+
+        embed_bottom = ((1.0 - i) * bottom_left.to_embed_pt()) + (
+            i * bottom_right.to_embed_pt()
+        )
         interp_img = plot_interp(bottom_left, bottom_right, interp=i)
-        collage.paste(interp_img, (int(PLOT_W * (N - 1) * i), PLOT_H * (N - 1)))
+        paste_labeled(interp_img, grid_k, N - 1, embed_bottom)
+
+        embed_left = ((1.0 - i) * top_left.to_embed_pt()) + (
+            i * bottom_left.to_embed_pt()
+        )
         interp_img = plot_interp(top_left, bottom_left, interp=i)
-        collage.paste(interp_img, (0, int(PLOT_H * (N - 1) * i)))
+        paste_labeled(interp_img, 0, grid_k, embed_left)
 
     # draw borders between outputs
     draw = ImageDraw.Draw(collage)

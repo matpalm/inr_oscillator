@@ -300,9 +300,9 @@ def create_rff_inr_model(
     if film_layers < 1:
         raise ValueError("film_layers must be >= 1 (concat path removed)")
     film_layers = min(film_layers, len(mlp_dims))
-    if mlp_activation not in {"relu", "leaky_relu", "siren"}:
+    if mlp_activation not in {"relu", "leaky_relu", "siren", "silu", "gelu"}:
         raise ValueError(
-            "mlp_activation must be one of {'relu', 'leaky_relu', 'siren'}"
+            "mlp_activation must be one of {'relu', 'leaky_relu', 'siren', 'silu', 'gelu'}"
         )
 
     inp = Input((None, in_d))
@@ -373,6 +373,10 @@ def create_rff_inr_model(
         elif mlp_activation == "leaky_relu":
             print("layer", i, "leaky 0.25", "(film)" if i < film_layers else "")
             h = LeakyReLU(alpha=0.25)(h)
+        elif mlp_activation == "silu":
+            h = Activation(tf.nn.silu, name=f"silu{i}")(h)
+        elif mlp_activation == "gelu":
+            h = Activation(tf.keras.activations.gelu, name=f"gelu{i}")(h)
         else:
             h = Activation(mlp_activation, name=f"act{i}")(h)
 
