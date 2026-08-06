@@ -277,13 +277,16 @@ class Embed2DData(object):
                 yield self._sample_single_wave(seq_len, wave)
 
         def gen_interp_waves():
-            assert emit_endpt_samples or emit_interpolated_samples
 
             samples_types = []
             if emit_endpt_samples:
                 samples_types.append("endpt")
             if emit_interpolated_samples:
                 samples_types.append("interp")
+            if emit_double_interpolated_samples:
+                samples_types.append("double_interp")
+            if len(samples_types) == 0:
+                raise Exception("need to be emitting at one least type of wave")
 
             while True:
                 sample_type = self.rng.choice(samples_types)
@@ -294,14 +297,18 @@ class Embed2DData(object):
                     case "interp":
                         # samples an edge of the simplex
                         w1, w2 = self.rng.choice(WAVE_EDGES)
-                        # emit interpolated; either with fixed start/end interp
-                        # or a blend from start -> end if emit_double_interpolated_samples
+                        # use fixed interp for entire sample
                         interp_start = self.rng.random()
-                        interp_end = (
-                            self.rng.random()
-                            if emit_double_interpolated_samples
-                            else None
+                        interp_end = None
+                        yield self._sample_interpolated_wave(
+                            seq_len, w1, w2, interp_start, interp_end
                         )
+                    case "double_interp":
+                        # samples an edge of the simplex
+                        w1, w2 = self.rng.choice(WAVE_EDGES)
+                        # use blended interp for entire sample
+                        interp_start = self.rng.random()
+                        interp_end = self.rng.random()
                         yield self._sample_interpolated_wave(
                             seq_len, w1, w2, interp_start, interp_end
                         )

@@ -30,14 +30,8 @@ from common.callbacks import (
 )
 from wandb.integration.keras import WandbMetricsLogger
 
+
 def train(opts):
-    activation_aliases = {
-        "leakyrelu": "leaky_relu",
-        "leaky-relu": "leaky_relu",
-    }
-    opts.mlp_activation = activation_aliases.get(
-        opts.mlp_activation, opts.mlp_activation
-    )
     if opts.mlp_activation not in {"relu", "leaky_relu", "siren", "silu", "gelu"}:
         raise Exception(
             "unsupported --mlp-activation. expected one of "
@@ -55,16 +49,14 @@ def train(opts):
     with open(run_path / "opts.json", "w") as f:
         json.dump(vars(opts), f, default=str)
 
-    in_d = 3  # phase, embed0, embed1
-    out_d = 1  # output wave
     train_seq_len = int(opts.train_seq_mult * opts.base_stft_win_length)
     print("TRAIN_SEQ_LEN", train_seq_len)
     print("TEST_SEQ_LEN", opts.test_seq_len)
 
     data, train_ds, validate_ds = build_datasets(opts)
 
-    # TODO: if film caching works there no reason to fo rff_l1 since
-    # it will be baked away
+    # TODO: if film caching works there no reason to for rff_l1 since
+    # it will be baked away (?)
 
     # make model
     model_config = {
@@ -198,6 +190,7 @@ def train(opts):
     train_model.fit(train_ds, callbacks=callbacks, epochs=opts.epochs, verbose=2)
 
     wandb.finish()
+
 
 def build_parser():
     parser = argparse.ArgumentParser(

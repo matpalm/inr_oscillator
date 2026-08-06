@@ -6,7 +6,7 @@ from .pcapture_uniform_data import ParametricCaptureUniformData
 
 
 def dataset_types():
-    return ["embed2d", "pcapture", "pcapture_uniform"]
+    return ["embed_2d", "embed_3d", "pcapture", "pcapture_uniform"]
 
 
 def add_dataset_parser_args(parser):
@@ -23,6 +23,8 @@ def build_datasets(opts):
     assert opts.dataset_type in dataset_types()
 
     if opts.dataset_type == "embed_2d":
+        print("Hack emit samples FalseFalseTrue")
+
         data = Embed2DData(
             min_note=opts.min_note,
             max_note=opts.max_note,
@@ -44,7 +46,9 @@ def build_datasets(opts):
             emit_endpt_samples=True,
             emit_interpolated_samples=True,
         )
-    elif opts.dataset_type == "pcapture":
+        return data, train_ds, validate_ds
+
+    if opts.dataset_type == "pcapture":
         data = ParametricCaptureStaticData(
             capture_run=opts.capture_run,
             keras_model=opts.keras_model,
@@ -64,7 +68,9 @@ def build_datasets(opts):
             emit_weights=False,
             deterministic=True,
         )
-    elif opts.dataset_type == "pcapture_uniform":
+        return data, train_ds, validate_ds
+
+    if opts.dataset_type == "pcapture_uniform":
         data = ParametricCaptureUniformData(
             capture_run=opts.capture_run,
             seed=opts.seed,
@@ -81,5 +87,6 @@ def build_datasets(opts):
             batch_size=opts.batch_size,
             deterministic=True,
         )
+        return data, train_ds, validate_ds
 
-    return data, train_ds, validate_ds
+    assert False, opts.dataset_type
