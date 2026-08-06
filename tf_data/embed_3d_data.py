@@ -12,9 +12,6 @@ FREQS = {
 FREQS["C3"] = FREQS["C4"] / 2
 FREQS["C5"] = FREQS["C4"] * 2
 
-# must match QuadratureVOct
-# QUADRATURE_AMPLITUDE = 0.99
-
 
 class Waveform(Enum):
     ZIGZAG = "triangle"
@@ -59,10 +56,12 @@ class Embed3DData(object):
 
     @classmethod
     def add_args(cls, parser):
-        parser.add_argument("--min-note", type=str, default="C3")
-        parser.add_argument("--max-note", type=str, default="C5")
-        parser.add_argument("--harsh", action="store_true")
-        parser.add_argument("--sample-rate-khz", type=float, default=192)
+        pass
+        # all in embed_2d !
+        # parser.add_argument("--min-note", type=str, default="C3")
+        # parser.add_argument("--max-note", type=str, default="C5")
+        # parser.add_argument("--harsh", action="store_true")
+        # parser.add_argument("--sample-rate-khz", type=float, default=192)
 
     def __init__(
         self,
@@ -81,7 +80,6 @@ class Embed3DData(object):
         self.rng = random.Random(seed)
 
     def in_d(self):
-        # input features: wrapped phase + 2D embedding point
         return 3
 
     def out_d(self):
@@ -164,50 +162,6 @@ class Embed3DData(object):
     def random_phase(self):
         return self.rng.random() * 2 * np.pi
 
-    # def _sample_single_wave(self, seq_len, w1):
-    #     data = self.calculate_wave(
-    #         self.random_freq(),
-    #         seq_len,
-    #         self.random_phase(),
-    #         w1,
-    #         waveform2=None,
-    #     )
-    #     embed_pt = w1.to_embed_pt()
-    #     return data, embed_pt
-
-    # def _sample_interpolated_wave(self, seq_len, w1, w2, interp_start, interp_end):
-    #     data = self.calculate_wave(
-    #         self.random_freq(),
-    #         seq_len,
-    #         self.random_phase(),
-    #         w1,
-    #         w2,
-    #         interp_start,
-    #         interp_end,
-    #     )
-    #     interp = data["interp"].astype(np.float32)
-    #     embed_pt = ((1.0 - interp)[:, None] * w1.to_embed_pt()) + (
-    #         interp[:, None] * w2.to_embed_pt()
-    #     )
-    #     return data, embed_pt
-
-    # def _xy_from_data(self, data, embed_pt):
-    #     # TODO: this could be a map in tf
-    #     N = len(data["phase"])
-    #     x = np.zeros((N, IN_D), dtype=np.float32)
-    #     y = np.zeros((N, OUT_D), dtype=np.float32)
-    #     x[:, 0] = data["phase"]
-    #     if np.ndim(embed_pt) == 1:
-    #         x[:, 1] = embed_pt[0]
-    #         x[:, 2] = embed_pt[1]
-    #     else:
-    #         x[:, 1] = embed_pt[:, 0]
-    #         x[:, 2] = embed_pt[:, 1]
-
-    #     y[:, 0] = data["wave"]
-
-    #     return x, y
-
     def pt_to_phase_waveform(self, pt, freq, phase, seq_len: int = 1024):
 
         # map it to two waveforms and interpolation amount
@@ -230,10 +184,6 @@ class Embed3DData(object):
         batch_size: int,
         seq_len: int,
         num_samples: int,
-        # emit_endpt_samples: bool = True,
-        # emit_interpolated_samples: bool = True,
-        # emit_double_interpolated_samples: bool = False,
-        # emit_specific_wave: Waveform = None,
     ):
         """
         Generate num_samples samples of shape (batch_size, seq_len, 4)
@@ -251,11 +201,13 @@ class Embed3DData(object):
                 pt = (self.rng.random() * 2.0) - 1.0
                 freq = self.random_freq()
                 phase = self.random_phase()
-                sawtooth_phase, waveform = self.pt_to_phase_waveform(pt, freq, phase)
+                sawtooth_phase, waveform = self.pt_to_phase_waveform(
+                    pt, freq, phase, seq_len=seq_len
+                )
                 x = np.zeros((seq_len, self.in_d()), dtype=np.float32)
                 x[:, 0] = sawtooth_phase
                 x[:, 1] = pt
-                x[:, 2] = 0.0
+                x[:, 2] = 0.0  # TODO: when we add :,3 for morph
                 y = np.zeros((seq_len, self.out_d()), dtype=np.float32)
                 y[:, 0] = waveform
                 yield x, y

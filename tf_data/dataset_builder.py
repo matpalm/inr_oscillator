@@ -1,6 +1,5 @@
 from .embed_2d_data import Embed2DData
-
-# from tf_data.pcapture_static_data import ParametricCaptureStaticData
+from .embed_3d_data import Embed3DData
 from .pcapture_inmem_data import ParametricCaptureStaticData
 from .pcapture_uniform_data import ParametricCaptureUniformData
 
@@ -10,10 +9,11 @@ def dataset_types():
 
 
 def add_dataset_parser_args(parser):
-    embed_2d_data_args = parser.add_argument_group("Embed2DData")
-    Embed2DData.add_args(embed_2d_data_args)
-    pcapture_data_args = parser.add_argument_group("ParametricCaptureStaticData")
-    ParametricCaptureStaticData.add_args(pcapture_data_args)
+    Embed2DData.add_args(parser.add_argument_group("Embed2DData"))
+    Embed3DData.add_args(parser.add_argument_group("Embed3DData"))
+    ParametricCaptureStaticData.add_args(
+        parser.add_argument_group("ParametricCaptureStaticData")
+    )
 
 
 def build_datasets(opts):
@@ -23,8 +23,6 @@ def build_datasets(opts):
     assert opts.dataset_type in dataset_types()
 
     if opts.dataset_type == "embed_2d":
-        print("Hack emit samples FalseFalseTrue")
-
         data = Embed2DData(
             min_note=opts.min_note,
             max_note=opts.max_note,
@@ -45,6 +43,26 @@ def build_datasets(opts):
             num_samples=opts.num_validate_samples,
             emit_endpt_samples=True,
             emit_interpolated_samples=True,
+        )
+        return data, train_ds, validate_ds
+
+    if opts.dataset_type == "embed_3d":
+        data = Embed3DData(
+            min_note=opts.min_note,
+            max_note=opts.max_note,
+            sample_rate_khz=opts.sample_rate_khz,
+            harsh=opts.harsh,
+            seed=opts.seed,
+        )
+        train_ds = data.tf_dataset(
+            batch_size=opts.batch_size,
+            seq_len=train_seq_len,
+            num_samples=opts.num_train_samples,
+        )
+        validate_ds = data.tf_dataset(
+            batch_size=opts.batch_size,
+            seq_len=opts.test_seq_len,
+            num_samples=opts.num_validate_samples,
         )
         return data, train_ds, validate_ds
 
