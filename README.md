@@ -1,0 +1,1 @@
+see [blog post](https://www.matpalm.com/blog/implicit_neural_oscillator/)
